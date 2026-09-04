@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode and Swift
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+
+# Go
+bin/
+coverage.out
+
+# Rust
+target/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+auth.json
+*.pem
+*.key
+
+# Local planning documents
+/CODEX_ACCOUNT_SWITCHER_PLAN.md
+
+# Runtime state
+.local/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# LLM Wiki operational session data
+.wiki/.sessions/
+
+# IDE
+.idea/
+*.swp
+*.swo
