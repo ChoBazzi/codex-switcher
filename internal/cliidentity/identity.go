@@ -1,0 +1,36 @@
+// Package cliidentity validates the conversation headers observed in the
+// supported Codex CLI. These are routing identifiers, not authentication.
+package cliidentity
+
+import (
+	"errors"
+	"net/http"
+)
+
+var ErrIdentity = errors.New("cli_conversation_identity_invalid")
+
+// ThreadID fails closed on missing, repeated, conflicting or malformed values.
+// Neither project nor worktree identity is inferred from these headers.
+func ThreadID(header http.Header) (string, error) {
+	threads, sessions := header.Values("Thread-Id"), header.Values("Session-Id")
+	if len(threads) != 1 || len(sessions) != 1 || threads[0] != sessions[0] || !uuid(threads[0]) {
+		return "", ErrIdentity
+	}
+	return threads[0], nil
+}
+
+func uuid(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, c := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return value != "00000000-0000-0000-0000-000000000000"
+}
