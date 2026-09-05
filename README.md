@@ -4,7 +4,40 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 설계 및 프로토콜 검증 단계입니다. SwiftUI 메뉴바 앱과 독립 Go helper로 구현하며, 다음 세션 인계와 CLI 재시도 차단을 검증합니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. SwiftUI, 실제 OAuth/Keychain, 사용량 조회, SQLite 영속화, Codex 프롬프트·세션 연동은 아직 구현되지 않았습니다.
+
+## Local development
+
+Go 1.24 이상이 필요합니다. 외부 Go 의존성은 없습니다.
+
+```sh
+go test -race ./...
+go vet ./...
+go build -o bin/switcher-helper ./cmd/switcher-helper
+```
+
+제한된 실행 환경에서 기본 Go 캐시에 쓸 수 없으면 `GOCACHE=/private/tmp/codex-switcher-go-build`를 지정합니다. HTTP 통합 테스트는 loopback 포트를 열 수 있어야 합니다.
+
+합성 데모 실행 (실제 Codex 설정·인증을 변경하지 않음):
+
+```sh
+export SWITCHER_CONTROL_TOKEN="local-demo-only-secret"
+go run ./cmd/switcher-helper --demo
+```
+
+별도 터미널에서:
+
+```sh
+curl -N http://127.0.0.1:8765/responses \
+  -H 'Content-Type: application/json' \
+  -H 'X-Switcher-Demo-Session: demo' \
+  -d '{"input":"synthetic"}'
+
+curl http://127.0.0.1:8765/control/status \
+  -H 'Authorization: Bearer local-demo-only-secret'
+```
+
+데모는 고정된 합성 SSE를 반환하며 실제 모델을 호출하지 않습니다. 데모 헤더를 공식 Codex 세션 식별 방식으로 사용하면 안 됩니다. 실패한 데모 세션은 프로세스 생명주기 동안 차단됩니다.
 
 ## Product principles
 
