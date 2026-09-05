@@ -4,7 +4,7 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. SwiftUI, 실제 OAuth/Keychain, 사용량 조회, SQLite 영속화, Codex 프롬프트·세션 연동은 아직 구현되지 않았습니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. SwiftUI, 실제 OAuth/Keychain, 사용량 조회, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
 
 ## Local development
 
@@ -38,6 +38,32 @@ curl http://127.0.0.1:8765/control/status \
 ```
 
 데모는 고정된 합성 SSE를 반환하며 실제 모델을 호출하지 않습니다. 데모 헤더를 공식 Codex 세션 식별 방식으로 사용하면 안 됩니다. 실패한 데모 세션은 프로세스 생명주기 동안 차단됩니다.
+
+## 실제 CLI 연결 테스트 (합성 서버)
+
+설치된 `codex` 실행 파일이 필요합니다. 검증 버전은 **0.153.4**입니다.
+
+```sh
+SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -v -timeout 100s ./internal/cliprobe
+```
+
+테스트가 자체적으로 임시 프로필과 로컬 서버를 준비하므로 별도 helper 실행은 필요하지 않습니다. 기존 Codex 설정과 로그인 정보를 변경하지 않으며 실제 모델을 호출하지 않습니다. 테스트용 임시 대화 기록은 종료 시 정리합니다.
+
+- 정상 응답과 429·503·스트리밍 중단: CLI와 upstream 각각 요청 1회인지 검사.
+- 두 작업 폴더에서 동시 실행: 대화 ID 분리 검사.
+- 기존 대화 `exec resume`: ID 유지 검사. 같은 폴더에서 새 대화 시작: 새 ID 검사.
+- 동일 TUI 프로세스 내 전환·Wiki 인계·실제 계정 전환은 아직 미검증입니다.
+
+기존 curl 데모에서 오류를 수동 재현하려면 helper를 종료하고 시나리오를 지정해 다시 실행합니다.
+
+```sh
+SWITCHER_CONTROL_TOKEN=local-demo-only-secret \
+  go run ./cmd/switcher-helper --demo --demo-scenario rate-limit
+```
+
+`success`, `rate-limit`, `server-error`, `partial`을 지원합니다. `/control/status`의 `upstream_calls`로 요청 횟수를 확인할 수 있습니다. 실패 후 같은 demo 세션을 다시 호출하면 409로 차단되며 횟수는 증가하지 않습니다.
+
+자세한 검증 범위는 [ADR 0012](docs/adr/0012-installed-cli-synthetic-probe.md)를 참고하세요.
 
 ## Product principles
 

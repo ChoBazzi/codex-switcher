@@ -18,52 +18,54 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ChoBazzi/codex-switcher/internal/cliidentity"
+	"github.com/ChoBazzi/codex-switcher/internal/cliprobe"
 	"github.com/ChoBazzi/codex-switcher/internal/proxy"
 )
 
 func main() {
 	demo := flag.Bool("demo", false, "run synthetic upstream; no real accounts")
 	port := flag.Int("port", 8765, "loopback port (0 selects an available port)")
+	scenario := flag.String("demo-scenario", "success", "synthetic response: success, rate-limit, server-error, partial")
 	flag.Parse()
 	if !*demo {
 		fmt.Fprintln(os.Stderr, "Only --demo is available; live Codex integration is not implemented.")
 		os.Exit(2)
 	}
 	secret := os.Getenv("SWITCHER_CONTROL_TOKEN")
-	if len(secret) < 16 || *port < 0 || *port > 65535 {
+	if len(secret) < 16 || *port < 0 || *port > 65535 || !cliprobe.ValidScenario(*scenario) {
 		fmt.Fprintln(os.Stderr, "Set SWITCHER_CONTROL_TOKEN (at least 16 characters) and a valid port.")
 		os.Exit(2)
 	}
-	if err := run(*port, secret); err != nil {
+	if err := run(*port, secret, *scenario); err != nil {
 		fmt.Fprintln(os.Stderr, "helper_start_or_shutdown_failed")
 		os.Exit(1)
 	}
 }
 
-func run(port int, secret string) error {
+func run(port int, secret, scenario string) error {
 	upListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
-	up := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		if _, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, 4<<20)); err != nil {
-			w.WriteHeader(413)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Synthetic proxy demo; no model called.\"}\n\n")
-		w.(http.Flusher).Flush()
-		io.WriteString(w, "data: {\"type\":\"response.completed\"}\n\n")
-	}), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)}
+	fixture := &cliprobe.Upstream{Scenario: scenario}
+	up := &http.Server{Handler: fixture, ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)}
 	go up.Serve(upListener)
 	defer up.Close()
 	h, err := proxy.New("http://"+upListener.Addr().String()+"/responses", func(r *http.Request) (proxy.Identity, error) {
-		// Demo sessions are deliberately fixed; this is NOT a Codex header adapter.
+		// Synthetic mode marker; never an authentication or production session ID.
 		if r.Header.Get("X-Switcher-Demo-Session") != "demo" {
 			return proxy.Identity{}, errors.New("unknown_demo_session")
 		}
-		return proxy.Identity{Session: "demo", Token: "synthetic-demo-token"}, nil
+		id := "demo"
+		if len(r.Header.Values("Thread-Id")) > 0 || len(r.Header.Values("Session-Id")) > 0 {
+			var err error
+			id, err = cliidentity.ThreadID(r.Header)
+			if err != nil {
+				return proxy.Identity{}, err
+			}
+		}
+		return proxy.Identity{Session: id, Token: "synthetic-demo-token"}, nil
 	})
 	if err != nil {
 		return err
@@ -77,7 +79,7 @@ func run(port int, secret string) error {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"mode": "demo", "live_accounts": false, "persistence": false})
+		json.NewEncoder(w).Encode(map[string]any{"mode": "demo", "live_accounts": false, "persistence": false, "scenario": scenario, "upstream_calls": fixture.Calls.Load()})
 	})
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
