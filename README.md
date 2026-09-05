@@ -4,11 +4,11 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. SwiftUI, 실제 OAuth/Keychain, 사용량 조회, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 공식 CLI 브라우저 로그인 위임과 네이티브 Keychain 저장을 구현했으며 실제 로그인은 사용자 검증 단계입니다. SwiftUI, live 모델 중계, 사용량/토큰 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
 
 ## Local development
 
-Go 1.24 이상이 필요합니다. 외부 Go 의존성은 없습니다.
+Go 1.24 이상이 필요합니다. 외부 Go 패키지 의존성은 없습니다. macOS Keychain 빌드에는 Xcode Command Line Tools와 활성화된 CGO(기본값)가 필요합니다.
 
 ```sh
 go test -race ./...
@@ -64,6 +64,39 @@ SWITCHER_CONTROL_TOKEN=local-demo-only-secret \
 `success`, `rate-limit`, `server-error`, `partial`을 지원합니다. `/control/status`의 `upstream_calls`로 요청 횟수를 확인할 수 있습니다. 실패 후 같은 demo 세션을 다시 호출하면 409로 차단되며 횟수는 증가하지 않습니다.
 
 자세한 검증 범위는 [ADR 0012](docs/adr/0012-installed-cli-synthetic-probe.md)를 참고하세요.
+
+## 브라우저 계정 등록 테스트
+
+아래 로그인 명령은 **실제 브라우저 인증을 시작하고 Switcher 전용 Keychain 항목에 저장**합니다. 기존 `~/.codex` 로그인 자료는 가져오거나 수정하지 않습니다. 모델 요청은 하지 않습니다.
+
+```sh
+go build -o bin/switcher-helper ./cmd/switcher-helper
+./bin/switcher-helper account login a
+```
+
+브라우저에서 로그인한 뒤 `"state":"succeeded"`를 확인하세요. macOS Keychain 승인이 표시되면 helper 경로를 확인하세요. 로그인 취소는 `Ctrl+C`이며 최대 5분 대기합니다. 브라우저가 열리지 않을 경우 이 버전에서는 수동 인증 URL을 출력하지 않습니다.
+
+새 터미널에서도 저장 상태를 확인할 수 있습니다.
+
+```sh
+./bin/switcher-helper account status
+```
+
+`registered: true`, `state: stored_unverified`는 로컬 저장 성공을 뜻하며 서버 인증 정상 여부나 사용량을 조회한 결과가 아닙니다. 만료된 계정은 `expired`로 표시합니다. 동일 계정으로 재인증하려면:
+
+```sh
+./bin/switcher-helper account reauth a
+```
+
+두 번째 계정은 `account login b`로 추가합니다. 같은 계정의 중복 등록과 잘못된 계정으로의 재인증은 거절합니다. 실제 모델 요청/계정 전환은 아직 테스트할 수 없습니다.
+
+인증 관련 일반 테스트는 합성 데이터만 사용합니다. 네이티브 Keychain 저장을 따로 검사하려면:
+
+```sh
+SWITCHER_KEYCHAIN_INTEGRATION=1 go test -count=1 -v -timeout 30s ./internal/credentialstore
+```
+
+이 테스트는 고유 이름의 합성 항목만 만들고 종료 시 삭제합니다. 강제 종료 시 임시 인증 파일 잔류 등의 한계는 [ADR 0013](docs/adr/0013-browser-login-and-keychain.md)에 기록했습니다. 오류가 나면 **오류 코드만 공유하고 auth.json·토큰·인증 URL은 공유하지 마세요.**
 
 ## Product principles
 
