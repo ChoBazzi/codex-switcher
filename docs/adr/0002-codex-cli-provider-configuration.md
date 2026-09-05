@@ -43,3 +43,7 @@ CLI가 프록시를 바라보게 만드는 방법에는 전역 설정 파일(`co
 
 ### 단점
 - 사용자가 alias를 설정하지 않은 환경에서는 명시적으로 `-p switcher`를 붙여야 한다.
+
+## 구현 검증 메모 (2026-09-06)
+
+ADR 0012에서 CLI 0.153.4의 독립 profile 파일 로딩을 합성 provider로 검증했다. 테스트 환경은 임시 `CODEX_HOME`을 사용한다. `--ignore-user-config`와 profile을 함께 사용하면 검증 버전에서 profile까지 적용되지 않으므로 조합하지 않는다. 실제 `chatgpt_base_url` 및 OAuth 경로는 아직 검증 전이다.
