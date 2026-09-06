@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ChoBazzi/codex-switcher/internal/affinity"
 	"github.com/ChoBazzi/codex-switcher/internal/checkpoint"
 	"github.com/ChoBazzi/codex-switcher/internal/handoff"
 	"github.com/ChoBazzi/codex-switcher/internal/proxy"
@@ -24,6 +25,7 @@ var (
 type Router struct {
 	mu        sync.Mutex
 	sessions  *handoff.Store
+	disk      *affinity.Store
 	access    usage.AccessSource
 	threshold float64
 	samples   map[string]usage.Snapshot
@@ -35,6 +37,21 @@ func New(access usage.AccessSource, threshold float64) (*Router, error) {
 		return nil, ErrPolicy
 	}
 	return &Router{sessions: handoff.New(), access: access, threshold: threshold, samples: map[string]usage.Snapshot{}}, nil
+}
+
+// NewPersistent uses SQLite as the sole owner map. The caller owns store.Close.
+// Usage must be refreshed after restart; cached quota is deliberately not saved.
+func NewPersistent(access usage.AccessSource, threshold float64, store *affinity.Store) (*Router, error) {
+	if store == nil {
+		return nil, ErrPolicy
+	}
+	r, err := New(access, threshold)
+	if err != nil {
+		return nil, err
+	}
+	r.sessions = nil
+	r.disk = store
+	return r, nil
 }
 
 // Update copies observations so callers cannot mutate routing decisions later.
@@ -112,8 +129,10 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 	if !userInput {
 		return handoff.Session{}, handoff.ErrInputRequired
 	}
-	if _, ok := r.sessions.Session(origin.Session); ok {
+	if _, err := r.lookup(origin.Session); err == nil {
 		return handoff.Session{}, handoff.ErrConflict
+	} else if !errors.Is(err, affinity.ErrUnknown) {
+		return handoff.Session{}, err
 	}
 	chosen := ""
 	best := -1.0
@@ -133,6 +152,9 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 	if chosen == "" {
 		return handoff.Session{}, ErrUnavailable
 	}
+	if r.disk != nil {
+		return r.disk.Register(origin, chosen, now)
+	}
 	if err := r.sessions.SetAccount(chosen, true); err != nil {
 		return handoff.Session{}, err
 	}
@@ -144,9 +166,20 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 func (r *Router) Resolve(origin checkpoint.Origin, now time.Time) (proxy.Identity, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s, ok := r.sessions.Session(origin.Session)
-	if !ok || s.Origin != origin {
+	s, err := r.lookup(origin.Session)
+	if errors.Is(err, affinity.ErrUnknown) {
 		return proxy.Identity{}, ErrIdentity
+	}
+	if err != nil {
+		return proxy.Identity{}, err
+	}
+	if s.Origin != origin {
+		return proxy.Identity{}, ErrIdentity
+	}
+	if r.disk != nil {
+		if err := r.disk.Ready(origin); err != nil {
+			return proxy.Identity{}, err
+		}
 	}
 	if _, ok := r.remaining(s.Account, now); !ok {
 		return proxy.Identity{}, ErrUnavailable
@@ -161,5 +194,17 @@ func (r *Router) Resolve(origin checkpoint.Origin, now time.Time) (proxy.Identit
 func (r *Router) Session(id string) (handoff.Session, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.sessions.Session(id)
+	x, err := r.lookup(id)
+	return x, err == nil
+}
+
+func (r *Router) lookup(id string) (handoff.Session, error) {
+	if r.disk != nil {
+		return r.disk.Lookup(id)
+	}
+	x, ok := r.sessions.Session(id)
+	if !ok {
+		return handoff.Session{}, affinity.ErrUnknown
+	}
+	return x, nil
 }

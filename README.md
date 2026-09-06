@@ -4,7 +4,7 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 브라우저 로그인·Keychain 저장과 `live-test`의 실제 서버 응답은 사용자 환경에서도 확인했습니다. 계정별 사용량 1회/60초 주기 조회를 추가했습니다. SwiftUI, 일반 대화형 CLI 연결, 토큰 자동 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 브라우저 로그인·Keychain 저장, 실제 모델 응답과 사용량 조회는 사용자 환경에서도 확인했습니다. 사용량 기반 계정 선택 및 SQLite 세션 저장소를 내부 모듈로 추가했습니다. SwiftUI, 일반 대화형 CLI 연결, 토큰 자동 갱신, 실제 프록시의 영속 저장 연결 및 Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
 
 ## Local development
 
@@ -159,7 +159,18 @@ go build -o bin/switcher-helper ./cmd/switcher-helper
 go test -race -count=1 ./internal/routing
 ```
 
-이 명령은 합성 데이터와 로컬 프록시로 검증하며 모델을 호출하지 않습니다. 아직 일반 CLI/상주 helper에 연결하지 않은 내부 모듈입니다. SQLite, continuation 소유권 연동, Wiki 전환 준비는 후속 작업입니다. [ADR 0016](docs/adr/0016-new-session-account-selection.md)
+이 명령은 합성 데이터와 로컬 프록시로 검증하며 모델을 호출하지 않습니다. 아직 일반 CLI/상주 helper에 연결하지 않은 내부 모듈입니다. 실제 프록시 continuation 연동과 Wiki 전환 준비는 후속 작업입니다. [ADR 0016](docs/adr/0016-new-session-account-selection.md)
+
+## SQLite 세션 저장 검증
+
+macOS 시스템 SQLite(CGO)를 사용하는 내부 저장소와 `routing.NewPersistent`를 추가했습니다. 세션 계정 고정, 응답 ID 소유권, 종료된 요청 의도의 차단 복구 및 14일 초과 유휴 정리를 검증합니다.
+
+```sh
+cd /Users/bazzi/dev/work/my
+go test -race -count=1 ./internal/affinity ./internal/routing
+```
+
+합성 데이터와 임시 DB만 사용하며 로그인이나 모델 호출은 없습니다. 일반 CLI/기존 프록시의 Begin/Finish 연결은 아직 없으므로 실사용 자동 복구 기능은 아닙니다. [ADR 0017](docs/adr/0017-sqlite-affinity-storage.md)
 
 ## Product principles
 
