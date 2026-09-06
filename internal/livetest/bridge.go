@@ -27,6 +27,7 @@ type Bridge struct {
 	Requests   atomic.Int64
 	Forwarded  atomic.Int64
 	LastStatus atomic.Int64
+	rejection  atomic.Value
 }
 
 // target is injectable only for synthetic package tests, not through the CLI.
@@ -50,10 +51,19 @@ func New(target, secret string, access accounts.Access) (*Bridge, error) {
 }
 func (b *Bridge) Close() { b.proxy.Close() }
 
+// Only locally defined constant codes are stored, never request or upstream text.
+func (b *Bridge) RejectionCode() string {
+	if value := b.rejection.Load(); value != nil {
+		return value.(string)
+	}
+	return ""
+}
+
 func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w = &statusWriter{ResponseWriter: w, status: &b.LastStatus}
 	b.Requests.Add(1)
 	deny := func(status int, code string) {
+		b.rejection.Store(code)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": code}})
@@ -97,16 +107,13 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var input []struct {
-		Type string `json:"type"`
-		Role string `json:"role"`
-	}
+	var input []json.RawMessage
 	if json.Unmarshal(body["input"], &input) != nil {
 		deny(400, "unsupported_input")
 		return
 	}
-	for _, item := range input {
-		if (item.Type != "message" && item.Type != "") || (item.Role != "user" && item.Role != "developer" && item.Role != "system") {
+	for _, raw := range input {
+		if !allowedInput(raw) {
 			deny(400, "continuation_not_allowed")
 			return
 		}
@@ -114,6 +121,49 @@ func (b *Bridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(data))
 	b.Forwarded.Add(1) // Entered proxy; not proof that the upstream processed it.
 	b.proxy.ServeHTTP(w, r)
+}
+
+func allowedInput(raw json.RawMessage) bool {
+	var item struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(raw, &item) != nil {
+		return false
+	}
+	if item.Type == "additional_tools" {
+		// Codex's default model supplies inline tool definitions, not past
+		// conversation. An ID-only reference must never pass this exception.
+		if item.Role != "developer" {
+			return false
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil {
+			return false
+		}
+		for key := range fields {
+			if key != "type" && key != "role" && key != "id" && key != "tools" {
+				return false
+			}
+		}
+		var id string
+		if value, ok := fields["id"]; ok && string(bytes.TrimSpace(value)) != "null" {
+			if json.Unmarshal(value, &id) != nil || len(id) > 256 {
+				return false
+			}
+		}
+		var tools []map[string]json.RawMessage
+		if json.Unmarshal(fields["tools"], &tools) != nil || len(tools) == 0 {
+			return false
+		}
+		for _, tool := range tools {
+			if len(tool) == 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return (item.Type == "message" || item.Type == "") && (item.Role == "user" || item.Role == "developer" || item.Role == "system")
 }
 
 type statusWriter struct {

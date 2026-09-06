@@ -113,6 +113,8 @@ go build -o bin/switcher-helper ./cmd/switcher-helper
 
 `login_credentials_expired`가 나오면 사용자가 직접 `./bin/switcher-helper account reauth a`를 실행하세요. 실패 시 helper는 자동 재전송하지 않습니다. 재시험 명령을 다시 실행하는 것은 별개의 새 모델 요청입니다. 오류 공유 시 진단 JSON과 오류 코드만 보내고 원본 인증 자료는 보내지 마세요.
 
+`proxy_admissions: 0`이면 OpenAI 전송 전 로컬 검사에서 거절된 것입니다. 이 경우 `local_rejection_code`에서 구체적인 사유를 확인할 수 있습니다. CLI 기본 모델이 보내는 인라인 `additional_tools` 정의도 지원하며, 과거 대화 참조와는 구분합니다.
+
 실제 토큰을 사용하지 않는 동일 경로의 합성 테스트:
 
 ```sh

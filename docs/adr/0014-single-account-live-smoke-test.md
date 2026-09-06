@@ -19,8 +19,10 @@
 - helper의 실제 목적지는 `https://chatgpt.com/backend-api/codex/responses`로 고정한다. 사용자 입력 URL이나 환경 변수로 변경할 수 없고 redirect는 추적하지 않는다. 이 경로는 설치된 CLI 0.153.4 바이너리의 backend base URL과 합성 테스트로 확인한 Responses 경로를 조합한 호환성 가정이며, 공개 API 계약이나 실제 서버 검증 완료로 간주하지 않는다.
 - 실행마다 생성한 로컬 식별 secret과 CLI 대화 헤더를 확인한다. 로컬 secret은 upstream에 전달하지 않는다. 테스트 실행 전체에 1회 예산을 적용하므로 실패 후 다른 thread ID를 보내도 추가 요청이 통과하지 않는다.
 - 기존 continuation/conversation 필드 및 assistant/tool/item-reference 입력은 거절한다. 이는 새 인사 대화 전용 제한이고 장기 작업/도구 루프/세션 재개 API가 아니다.
+- CLI 기본 모델에서 새 요청에도 추가되는 `additional_tools`는 과거 대화가 아닌 인라인 도구 정의다. developer 역할, 실제 tools 배열 및 알려진 필드(type/role/id/tools)만 허용한다. 정의 없는 ID 참조, assistant 역할과 continuation 필드는 계속 거절한다. 기본 모델을 생략한 합성 회귀 테스트를 포함한다.
 - upstream 본문은 기존 단일 시도 프록시로 전달한다. installed CLI 합성 테스트에서 `stream=true`, `store=false`를 확인한다. 실패 응답의 재생, 프롬프트 변경 및 토큰 갱신은 하지 않는다.
 - CLI 원본 stdout/stderr는 제한된 메모리 버퍼에만 받고 실패 원문을 출력하지 않는다. 성공한 assistant 최종 메시지는 사용자 응답으로 stdout에 표시한다. 별도 진단(stderr)은 슬롯·요청 수·HTTP 상태·성공 여부만 포함한다.
+- 로컬 거절 시 `local_rejection_code`로 코드에 정의된 사유만 표시한다. 원본 헤더·본문·upstream 오류 텍스트는 포함하지 않는다. `proxy_admissions=0`인 로컬 거절은 모델 서버 전송 전 실패다.
 - `proxy_admissions`는 프록시에 진입한 횟수이며 서버 실행 완료 횟수는 아니다. CLI 요청·진입 각각 1회, HTTP 2xx 및 CLI 성공 응답이 함께 확인돼야 테스트 성공으로 표시한다.
 - 최대 2분, Ctrl+C/SIGTERM 종료를 지원하며 정상 종료에서는 임시 CLI 디렉터리와 서버를 정리한다. 1회 실행 후 CLI 대화를 보존하거나 자동 재개하지 않는다.
 

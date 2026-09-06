@@ -77,7 +77,7 @@ func liveCommand(args []string, out, diagnostics io.Writer) error {
 	if runErr == nil && (b.Requests.Load() != 1 || b.Forwarded.Load() != 1 || b.LastStatus.Load() < 200 || b.LastStatus.Load() >= 300) {
 		runErr = errors.New("live_proxy_path_not_verified")
 	}
-	json.NewEncoder(diagnostics).Encode(map[string]any{"event": "live_test_finished", "slot": args[0], "cli_requests": b.Requests.Load(), "proxy_admissions": b.Forwarded.Load(), "last_http_status": b.LastStatus.Load(), "succeeded": runErr == nil})
+	json.NewEncoder(diagnostics).Encode(map[string]any{"event": "live_test_finished", "slot": args[0], "cli_requests": b.Requests.Load(), "proxy_admissions": b.Forwarded.Load(), "last_http_status": b.LastStatus.Load(), "local_rejection_code": b.RejectionCode(), "succeeded": runErr == nil})
 	if runErr != nil {
 		return runErr
 	}

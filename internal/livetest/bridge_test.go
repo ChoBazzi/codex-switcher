@@ -31,9 +31,13 @@ func TestInstalledCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal("codex required")
 	}
-	for _, scenario := range []string{"success", "rate-limit", "server-error", "partial"} {
+	for _, scenario := range []string{"success", "rate-limit", "server-error", "partial", "default-model"} {
 		t.Run(scenario, func(t *testing.T) {
-			fixture := &cliprobe.Upstream{Scenario: scenario}
+			fixtureScenario, model := scenario, "switcher-synthetic"
+			if scenario == "default-model" {
+				fixtureScenario, model = "success", ""
+			}
+			fixture := &cliprobe.Upstream{Scenario: fixtureScenario}
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				data, err := io.ReadAll(r.Body)
 				if err != nil {
@@ -63,10 +67,10 @@ func TestInstalledCLI(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			parent := t.TempDir()
-			answer, err := Run(ctx, binary, parent, p.URL, testSecret, "switcher-synthetic")
-			if scenario == "success" {
+			answer, err := Run(ctx, binary, parent, p.URL, testSecret, model)
+			if fixtureScenario == "success" {
 				if err != nil || answer != cliprobe.Reply {
-					t.Fatal("CLI success not recognized", err)
+					t.Fatal("CLI success not recognized", err, "local_rejection", b.RejectionCode())
 				}
 			} else if err == nil {
 				t.Fatal("failed request accepted")
@@ -163,5 +167,31 @@ func TestProfileAndBoundedOutput(t *testing.T) {
 	n, err := io.WriteString(&out, strings.Repeat("x", (1<<20)+1))
 	if err != nil || n != (1<<20)+1 || !out.overflow || out.data.Len() != 1<<20 {
 		t.Fatal("output not bounded")
+	}
+}
+
+func TestAdditionalToolsAreDefinitionsNotContinuation(t *testing.T) {
+	valid := `{"type":"additional_tools","role":"developer","id":"synthetic-tools","tools":[{"type":"function","name":"synthetic_tool","parameters":{"type":"object"}}]}`
+	if !allowedInput(json.RawMessage(valid)) {
+		t.Fatal("inline tool definitions rejected")
+	}
+	for _, bad := range []string{
+		`{"type":"additional_tools","role":"developer","id":"synthetic-old"}`,
+		`{"type":"additional_tools","role":"developer","tools":null}`,
+		`{"type":"additional_tools","role":"developer","tools":[null]}`,
+		`{"type":"additional_tools","role":"assistant","tools":[{"type":"function"}]}`,
+		`{"type":"additional_tools","role":"developer","tools":[{"type":"function"}],"previous_response_id":"synthetic-old"}`,
+		`{"type":"item_reference","id":"synthetic-old"}`,
+	} {
+		if allowedInput(json.RawMessage(bad)) {
+			t.Fatal("invalid definition or continuation accepted")
+		}
+	}
+	b, _ := New("http://127.0.0.1:1", testSecret, testAccess())
+	defer b.Close()
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, testRequest(`{"input":[{"type":"item_reference","id":"synthetic-secret"}]}`))
+	if b.RejectionCode() != "continuation_not_allowed" || strings.Contains(w.Body.String(), "synthetic-secret") {
+		t.Fatal("unsafe or missing local rejection code")
 	}
 }
