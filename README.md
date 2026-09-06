@@ -151,6 +151,16 @@ go build -o bin/switcher-helper ./cmd/switcher-helper
 
 사용량 경로는 공개 API 계약이 아닌 Codex backend 호환 구현이며, 이번 추가분은 합성 응답으로 검증했습니다. 실제 계정의 응답 호환성은 위 명령으로 확인하세요. macOS Keychain 접근 승인이 표시될 수 있습니다. 토큰·계정 식별자·원본 서버 본문은 출력하지 않습니다. 앱/제어 API 연결과 영속 저장은 후속 단계입니다. [ADR 0015](docs/adr/0015-account-usage-polling.md)
 
+## 내부 계정 선택·세션 고정 검증
+
+사용량 실계정 조회 성공 후, 신규 계정 선택 모듈을 추가했습니다. 신규 세션은 기본 90% 소진 미만 계정 중 잔여율이 높은 계정을 선택하고 기존 세션은 원래 계정을 유지합니다. 사용량 미확인·조회 실패·인증 만료 시 다른 계정으로 우회하지 않습니다.
+
+```sh
+go test -race -count=1 ./internal/routing
+```
+
+이 명령은 합성 데이터와 로컬 프록시로 검증하며 모델을 호출하지 않습니다. 아직 일반 CLI/상주 helper에 연결하지 않은 내부 모듈입니다. SQLite, continuation 소유권 연동, Wiki 전환 준비는 후속 작업입니다. [ADR 0016](docs/adr/0016-new-session-account-selection.md)
+
 ## Product principles
 
 - 다음 세션에 계정을 지정하고 사용자 입력을 기다립니다. 같은 CLI에서 새 세션을 여는 연동은 검증 대상입니다.
