@@ -4,7 +4,7 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 브라우저 로그인과 Keychain 저장은 사용자 환경에서도 확인했으며, 등록한 단일 계정의 실제 요청을 확인하는 `live-test`를 추가했습니다. 실제 서버 응답은 사용자 검증 대상입니다. SwiftUI, 일반 대화형 CLI 연결, 사용량/토큰 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 브라우저 로그인·Keychain 저장과 `live-test`의 실제 서버 응답은 사용자 환경에서도 확인했습니다. 계정별 사용량 1회/60초 주기 조회를 추가했습니다. SwiftUI, 일반 대화형 CLI 연결, 토큰 자동 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
 
 ## Local development
 
@@ -121,7 +121,35 @@ go build -o bin/switcher-helper ./cmd/switcher-helper
 SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -v -timeout 100s ./internal/livetest
 ```
 
-지원 범위와 backend 경로의 미검증 사항은 [ADR 0014](docs/adr/0014-single-account-live-smoke-test.md)에 기록했습니다.
+지원 범위와 backend 경로의 호환성 제약은 [ADR 0014](docs/adr/0014-single-account-live-smoke-test.md)에 기록했습니다.
+
+## 계정별 사용량 조회
+
+저장된 인증으로 사용량 메타데이터만 읽습니다. **모델을 호출하지 않으며 대화나 Codex 설정을 변경하지 않습니다.** 저장소 폴더에서 실행하세요.
+
+```sh
+cd /Users/bazzi/dev/work/my
+go build -o bin/switcher-helper ./cmd/switcher-helper
+./bin/switcher-helper usage
+```
+
+`a`, `b`를 각각 조회하고 JSON 한 줄로 출력합니다. 특정 계정만 조회하려면 `usage a`를 사용하세요. 1분 간격으로 계속 확인하려면:
+
+```sh
+./bin/switcher-helper usage --watch
+```
+
+즉시 한 번 조회한 다음 60초마다 갱신합니다. `Ctrl+C`로 종료합니다. `usage --watch a`도 가능합니다. 옵션은 계정명 앞에 둡니다. 수동 갱신은 `usage`를 다시 실행하면 됩니다.
+
+- `usage.primary`, `usage.secondary`: 서버가 알려준 사용률·잔여율·구간 길이(초)·초기화 시각(UTC). 확인되지 않은 값은 `null`입니다.
+- `usage.remaining_percent`: 두 구간 잔여율의 최솟값. 한쪽이라도 모르면 `null`입니다. 절대 메시지 개수나 모델별 사용 가능 여부를 의미하지 않습니다.
+- `state`: `ok`(두 구간 수치 확인), `unknown`, `limit_reached`(서버 명시), `not_registered`, `auth_expired`, `auth_error`, `rate_limited`, `fetch_error`.
+- `last_attempt`, `last_success`, `stale`: 마지막 시도/성공 시각과 오래된 데이터 여부. watch 중 실패하면 이전 성공 수치를 유지하되 `stale: true`로 표시합니다. 수신이 멈춘 경우 소비자는 성공 시각에서 2분이 지나면 오래된 값으로 취급해야 합니다.
+- `usage.checkpoint_level`: 잔여율 50%·10% 경계의 **관측값**입니다. 아직 Wiki 작성 이벤트나 자동 전환을 실행하지 않습니다. 이전 수치가 남아 있을 수 있으므로 `stale`과 함께 확인하세요.
+
+401/403 또는 `auth_expired`이면 해당 계정을 `account reauth a` 또는 `account reauth b`로 직접 재인증하세요. 429는 조회 제한이며 계정 한도 소진으로 단정하지 않습니다. 오류 직후 추가 재시도는 없고, watch의 다음 정규 주기만 진행합니다. 단발 조회는 실패 상태를 출력한 뒤 종료 코드 1을 반환합니다(미등록·미확인 수치 자체는 오류 아님).
+
+사용량 경로는 공개 API 계약이 아닌 Codex backend 호환 구현이며, 이번 추가분은 합성 응답으로 검증했습니다. 실제 계정의 응답 호환성은 위 명령으로 확인하세요. macOS Keychain 접근 승인이 표시될 수 있습니다. 토큰·계정 식별자·원본 서버 본문은 출력하지 않습니다. 앱/제어 API 연결과 영속 저장은 후속 단계입니다. [ADR 0015](docs/adr/0015-account-usage-polling.md)
 
 ## Product principles
 
