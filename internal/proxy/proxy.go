@@ -140,7 +140,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reject(w, 409, "session_owner_unverified")
 			return
 		}
-		lease, err = h.store.Begin(identity.Origin, refs, time.Now())
+		lease, err = h.store.BeginWithInputs(identity.Origin, refs, inlineMessageIDs(body), time.Now())
 		if err != nil {
 			reject(w, 409, "continuation_or_session_unavailable")
 			return

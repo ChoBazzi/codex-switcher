@@ -133,3 +133,28 @@ func TestPartialItemsDoNotGrantOwnership(t *testing.T) {
 		t.Fatal("partial session remained ready")
 	}
 }
+
+func TestCLIInputClaimsOnlyValidatedContent(t *testing.T) {
+	body := []byte(`{"client_metadata":{},"include":[],"prompt_cache_key":"synthetic","input":[{"type":"message","role":"user","id":"msg-client","content":"hello"},{"type":"function_call_output","id":"out-client","call_id":"known-call","output":"result"}]}`)
+	refs, err := continuationRefs(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0] != "call:function:known-call" {
+		t.Fatal("tool dependency missing")
+	}
+	claims := inlineMessageIDs(body)
+	if len(claims) != 2 || claims[0] != "item:msg-client" || claims[1] != "item:out-client" {
+		t.Fatal("incorrect client claims")
+	}
+	for _, invalid := range []string{
+		`{"input":[{"type":"message","role":"user","id":"x"}]}`,
+		`{"input":[{"type":"message","role":"assistant","id":"x","content":"x"}]}`,
+		`{"input":[{"type":"message","role":"user","id":"item:forged","content":"x"}]}`,
+		`{"input":[{"type":"function_call_output","id":"new","call_id":"known","output":null}]}`,
+	} {
+		if _, err := continuationRefs([]byte(invalid)); err == nil {
+			t.Fatal("invalid inline identity accepted")
+		}
+	}
+}

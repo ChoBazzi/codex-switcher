@@ -3,7 +3,9 @@ package affinity
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +183,12 @@ func (s *Store) Ready(o checkpoint.Origin) error {
 // Begin durably records intent BEFORE upstream I/O. Unknown or cross-session
 // continuation references are denied, even when two sessions use the same slot.
 func (s *Store) Begin(o checkpoint.Origin, refs []string, now time.Time) (Lease, error) {
+	return s.BeginWithInputs(o, refs, nil, now)
+}
+
+// BeginWithInputs claims IDs of fully supplied new text messages. Existing
+// owners may never change; references are still required to exist independently.
+func (s *Store) BeginWithInputs(o checkpoint.Origin, refs, inputs []string, now time.Time) (Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var lease Lease
@@ -199,12 +207,31 @@ func (s *Store) Begin(o checkpoint.Origin, refs []string, now time.Time) (Lease,
 			if !valid(id) {
 				return ErrUnknown
 			}
+			id = historyScope(id, o.Session)
 			rows, err := s.db.query("SELECT session FROM responses WHERE id=?", id)
 			if err != nil {
 				return err
 			}
 			if len(rows) != 1 || rows[0][0] != o.Session {
 				return ErrUnknown
+			}
+		}
+		for _, id := range inputs {
+			if !valid(id) {
+				return ErrUnknown
+			}
+			rows, err := s.db.query("SELECT session FROM responses WHERE id=?", id)
+			if err != nil {
+				return err
+			}
+			if len(rows) > 0 {
+				if rows[0][0] != o.Session {
+					return ErrUnknown
+				}
+				continue
+			}
+			if _, err = s.db.query("INSERT INTO responses(id,session) VALUES(?,?)", id, o.Session); err != nil {
+				return err
 			}
 		}
 		lease = Lease{Session: x, Request: rand.Text()}
@@ -236,6 +263,7 @@ func (s *Store) Finish(lease Lease, ids []string, success bool, now time.Time) e
 				if !valid(id) {
 					return ErrConflict
 				}
+				id = historyScope(id, x.Origin.Session)
 				rows, err := s.db.query("SELECT session FROM responses WHERE id=?", id)
 				if err != nil {
 					return err
@@ -255,6 +283,15 @@ func (s *Store) Finish(lease Lease, ids []string, success bool, now time.Time) e
 		_, err = s.db.query("UPDATE sessions SET state=?,request='',last_seen=MAX(last_seen,?) WHERE id=?", next, stamp(now), x.Origin.Session)
 		return err
 	})
+}
+
+// Identical text may be independently produced in multiple sessions. Scope its
+// digest to the owning session instead of treating content as a global ID.
+func historyScope(id, session string) string {
+	if strings.HasPrefix(id, "history:") {
+		return fmt.Sprintf("history:%x:%s", sha256.Sum256([]byte(session)), strings.TrimPrefix(id, "history:"))
+	}
+	return id
 }
 
 // GC never deletes active intent; response ownership is removed in the same tx.

@@ -194,3 +194,33 @@ func TestCorruptionAndFutureSchemaFailClosed(t *testing.T) {
 		t.Fatal("corrupt file changed")
 	}
 }
+
+func TestInputOwnershipCannotOverwriteOrBootstrap(t *testing.T) {
+	s := openTest(t, filepath.Join(t.TempDir(), "private"))
+	now := time.Now()
+	register(t, s, "one", "a", now)
+	register(t, s, "two", "b", now)
+	l, err := s.BeginWithInputs(origin("one"), nil, []string{"item:client"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Finish(l, nil, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.BeginWithInputs(origin("two"), nil, []string{"item:rollback", "item:client"}, now); !errors.Is(err, ErrUnknown) {
+		t.Fatal("input owner overwritten")
+	}
+	if _, err = s.Begin(origin("two"), []string{"item:rollback"}, now); !errors.Is(err, ErrUnknown) {
+		t.Fatal("partial adoption persisted")
+	}
+	if _, err = s.BeginWithInputs(origin("two"), []string{"item:self"}, []string{"item:self"}, now); !errors.Is(err, ErrUnknown) {
+		t.Fatal("unowned reference bootstrapped")
+	}
+	l, err = s.BeginWithInputs(origin("one"), []string{"item:client"}, []string{"item:client"}, now)
+	if err != nil {
+		t.Fatal("same-session input reuse rejected")
+	}
+	if err = s.Finish(l, nil, true, now); err != nil {
+		t.Fatal(err)
+	}
+}
