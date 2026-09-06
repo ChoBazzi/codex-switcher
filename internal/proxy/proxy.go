@@ -16,9 +16,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ChoBazzi/codex-switcher/internal/affinity"
+	"github.com/ChoBazzi/codex-switcher/internal/checkpoint"
 )
 
-type Identity struct{ Session, Token, AccountID string }
+type Identity struct {
+	Session, Token, AccountID string
+	Origin                    checkpoint.Origin
+	Slot                      string
+}
 type Resolver func(*http.Request) (Identity, error)
 
 type Handler struct {
@@ -28,6 +35,21 @@ type Handler struct {
 	mu        sync.Mutex
 	busy      map[string]bool
 	blocked   map[string]bool
+	store     *affinity.Store
+}
+
+// NewPersistent requires a trusted resolver with verified origin and slot.
+// It does not register unknown sessions or manage the store's lifetime.
+func NewPersistent(target string, resolve Resolver, store *affinity.Store) (*Handler, error) {
+	if store == nil {
+		return nil, errors.New("persistent_store_required")
+	}
+	h, err := New(target, resolve)
+	if err != nil {
+		return nil, err
+	}
+	h.store = store
+	return h, nil
 }
 
 func New(target string, resolve Resolver) (*Handler, error) {
@@ -106,6 +128,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(w, 400, "invalid_json")
 		return
 	}
+	var lease affinity.Lease
+	if h.store != nil {
+		refs, err := continuationRefs(body)
+		if err != nil {
+			reject(w, 400, "unsupported_persistent_request")
+			return
+		}
+		s, err := h.store.Lookup(identity.Session)
+		if err != nil || identity.Origin.Session != identity.Session || s.Origin != identity.Origin || s.Account != identity.Slot {
+			reject(w, 409, "session_owner_unverified")
+			return
+		}
+		lease, err = h.store.Begin(identity.Origin, refs, time.Now())
+		if err != nil {
+			reject(w, 409, "continuation_or_session_unavailable")
+			return
+		}
+		defer func() {
+			if failed {
+				_ = h.store.Finish(lease, nil, false, time.Now())
+			}
+		}()
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	out, err := http.NewRequestWithContext(ctx, http.MethodPost, h.target, bytes.NewReader(body))
@@ -147,11 +192,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(resp.StatusCode)
 	controller := http.NewResponseController(w)
-	observer := eventObserver{}
+	observer := eventObserver{strict: h.store != nil}
+	var jsonBody []byte
 	buf := make([]byte, 16*1024)
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			if h.store != nil && !stream && resp.StatusCode < 300 {
+				if len(jsonBody)+n > 4<<20 {
+					panic(http.ErrAbortHandler)
+				}
+				jsonBody = append(jsonBody, buf[:n]...)
+			}
 			if _, err := w.Write(buf[:n]); err != nil {
 				return
 			}
@@ -171,7 +223,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if stream && (!observer.completed || observer.failed) {
 				panic(http.ErrAbortHandler)
 			}
-			failed = resp.StatusCode >= 400
+			if h.store != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				id := observer.responseID
+				if !stream {
+					id = completedID(jsonBody)
+				}
+				if id == "" {
+					panic(http.ErrAbortHandler)
+				}
+				if err := h.store.Finish(lease, []string{id}, true, time.Now()); err != nil {
+					panic(http.ErrAbortHandler)
+				}
+			}
+			failed = resp.StatusCode < 200 || resp.StatusCode >= 300
 			return
 		}
 	}
@@ -190,6 +254,8 @@ type eventObserver struct {
 	buffer            []byte
 	data              []byte
 	completed, failed bool
+	strict            bool
+	responseID        string
 }
 
 func (o *eventObserver) feed(b []byte) bool {
@@ -206,11 +272,20 @@ func (o *eventObserver) feed(b []byte) bool {
 		o.buffer = o.buffer[i+1:]
 		if line == "" {
 			var event struct {
-				Type string `json:"type"`
+				Type     string          `json:"type"`
+				Response json.RawMessage `json:"response"`
 			}
 			if json.Unmarshal(o.data, &event) == nil {
 				switch event.Type {
 				case "response.completed":
+					if o.strict {
+						id := completedID(event.Response)
+						if id == "" || o.completed {
+							o.failed = true
+						} else {
+							o.responseID = id
+						}
+					}
 					o.completed = true
 				case "response.failed", "response.incomplete", "error":
 					o.failed = true

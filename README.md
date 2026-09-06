@@ -170,7 +170,13 @@ cd /Users/bazzi/dev/work/my
 go test -race -count=1 ./internal/affinity ./internal/routing
 ```
 
-합성 데이터와 임시 DB만 사용하며 로그인이나 모델 호출은 없습니다. 일반 CLI/기존 프록시의 Begin/Finish 연결은 아직 없으므로 실사용 자동 복구 기능은 아닙니다. [ADR 0017](docs/adr/0017-sqlite-affinity-storage.md)
+합성 데이터와 임시 DB만 사용하며 로그인이나 모델 호출은 없습니다. [ADR 0017](docs/adr/0017-sqlite-affinity-storage.md)
+
+선택적 `proxy.NewPersistent`는 요청 전 SQLite 기록, `previous_response_id` 소유권 검사, JSON/SSE 완료 ID 저장 및 실패 차단을 연결합니다. 텍스트 입력만 지원하며 도구 결과/item 참조는 차단합니다. 기존 demo/live-test와 일반 CLI 런처에는 아직 적용하지 않았습니다. 실사용 자동 복구 기능은 아닙니다. [ADR 0018](docs/adr/0018-persistent-proxy-lifecycle.md)
+
+```sh
+go test -race -count=1 ./internal/proxy ./internal/affinity ./internal/routing
+```
 
 ## Product principles
 

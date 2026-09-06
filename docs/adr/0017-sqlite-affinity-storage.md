@@ -22,7 +22,7 @@
 
 ## 구현 범위와 후속 작업
 
-이 단계는 저장소와 내부 라우터 연동이다. 기본 `routing.New` 및 기존 demo/live-test는 그대로이며 일반 CLI/상주 helper에는 아직 연결하지 않는다. 프록시 본문의 모든 continuation 추출, Begin/Finish 수명주기 연결, 응답/SSE ID 관찰, 주기 GC 호출은 후속 단계다. 따라서 현재 실사용 프록시의 실패 상태가 자동 영속화된다고 주장하지 않는다. Wiki 예약과 스냅샷 영속화도 별도다.
+이 단계는 저장소와 내부 라우터 연동이다. ADR 0018에서 선택적 영속 프록시의 Begin/Finish 및 제한된 응답 ID 관찰을 연결했다. 기본 `routing.New` 및 기존 demo/live-test는 그대로이며 일반 CLI/상주 helper에는 아직 연결하지 않는다. 전체 CLI continuation 지원, 주기 GC, Wiki 예약과 스냅샷 영속화는 별도다.
 
 CGO 비활성 또는 macOS 외 환경에서는 명시적 저장소 사용 불가로 실패하고 메모리/평문 파일 대체 저장으로 우회하지 않는다. DB 손상 시에도 자동 초기화하지 않는다.
 

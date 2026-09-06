@@ -188,7 +188,7 @@ func (r *Router) Resolve(origin checkpoint.Origin, now time.Time) (proxy.Identit
 	if err != nil {
 		return proxy.Identity{}, ErrUnavailable
 	}
-	return proxy.Identity{Session: origin.Session, Token: a.Token, AccountID: a.AccountID}, nil
+	return proxy.Identity{Session: origin.Session, Token: a.Token, AccountID: a.AccountID, Origin: origin, Slot: s.Account}, nil
 }
 
 func (r *Router) Session(id string) (handoff.Session, bool) {
