@@ -172,10 +172,16 @@ go test -race -count=1 ./internal/affinity ./internal/routing
 
 합성 데이터와 임시 DB만 사용하며 로그인이나 모델 호출은 없습니다. [ADR 0017](docs/adr/0017-sqlite-affinity-storage.md)
 
-선택적 `proxy.NewPersistent`는 요청 전 SQLite 기록, `previous_response_id` 소유권 검사, JSON/SSE 완료 ID 저장 및 실패 차단을 연결합니다. 텍스트 입력만 지원하며 도구 결과/item 참조는 차단합니다. 기존 demo/live-test와 일반 CLI 런처에는 아직 적용하지 않았습니다. 실사용 자동 복구 기능은 아닙니다. [ADR 0018](docs/adr/0018-persistent-proxy-lifecycle.md)
+선택적 `proxy.NewPersistent`는 요청 전 SQLite 기록, `previous_response_id` 소유권 검사, JSON/SSE 완료 ID 저장 및 실패 차단을 연결합니다. 텍스트와 소유권이 확인된 item 참조·함수 호출·문자열 함수 결과를 지원합니다. 기타 CLI 도구 확장은 아직 차단합니다. 기존 demo/live-test와 일반 CLI 런처에는 아직 적용하지 않았습니다. 실사용 자동 복구 기능은 아닙니다. [ADR 0018](docs/adr/0018-persistent-proxy-lifecycle.md), [ADR 0019](docs/adr/0019-function-and-item-ownership.md)
 
 ```sh
 go test -race -count=1 ./internal/proxy ./internal/affinity ./internal/routing
+```
+
+설치된 CLI의 함수 결과 반환 형식만 따로 검증하려면 아래 명령을 사용합니다. 존재하지 않는 합성 도구를 사용하므로 실제 도구/모델 호출은 없습니다. 영속 프록시 전체 CLI 연결 테스트는 아닙니다.
+
+```sh
+SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 ./internal/cliprobe -run TestInstalledCodexFunctionOutput
 ```
 
 ## Product principles
