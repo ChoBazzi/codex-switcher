@@ -184,6 +184,16 @@ go test -race -count=1 ./internal/proxy ./internal/affinity ./internal/routing
 SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 ./internal/cliprobe -run TestInstalledCodexFunctionOutput
 ```
 
+영속 프록시를 거치는 CLI 합성 함수 왕복 테스트도 추가했습니다. 새 메시지/함수 결과 ID의 소유권을 원자적으로 등록하며, CLI 시작 이벤트로 확인한 세션만 연결합니다. 실제 모델·도구를 호출하지 않는 개발용 검증이며 일반 CLI 런처 기능은 아닙니다. [ADR 0020](docs/adr/0020-cli-persistent-function-probe.md)
+
+```sh
+SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -v ./internal/cliprobe -run TestInstalledCodexPersistentFunction
+```
+
+영속 경로는 완전한 `additional_tools` 정의와 이전 완료 응답에서 관찰한 assistant/reasoning 이력도 검사합니다. 이력은 세션별 내용 해시와 item ID 소유권을 확인하며 변경된 내용은 차단합니다. 이 확장의 실제 CLI 왕복 검증은 남아 있고, 현재 로컬 합성 테스트로 검증합니다. [ADR 0021](docs/adr/0021-owned-history-and-tool-definitions.md)
+
+CLI 프로세스별 연결 모듈도 추가했습니다. 실행별 인증, 시작 이벤트, 새 대화/resume 구분과 프로젝트 일치를 확인하며, 위 영속 함수 왕복 테스트가 이 모듈과 라우터를 함께 검증합니다. 일반 CLI 실행 명령은 아직 후속 작업입니다. [ADR 0022](docs/adr/0022-cli-process-session-binding.md)
+
 ## Product principles
 
 - 다음 세션에 계정을 지정하고 사용자 입력을 기다립니다. 같은 CLI에서 새 세션을 여는 연동은 검증 대상입니다.
