@@ -115,6 +115,37 @@ func (m *Manager) Status() ([]Status, error) {
 	return statuses, nil
 }
 
+// Access returns only the credentials required for a model request, never the
+// refresh or ID token. It performs no network request or automatic refresh.
+func (m *Manager) Access(slot string, now time.Time) (Access, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validSlot(slot) {
+		return Access{}, ErrSlot
+	}
+	r, err := m.read()
+	if err != nil {
+		return Access{}, err
+	}
+	for _, a := range r.Accounts {
+		if a.Slot == slot {
+			if !a.Credentials.ExpiresAt.After(now.Add(30 * time.Second)) {
+				return Access{}, ErrExpired
+			}
+			return Access{Token: a.Credentials.AccessToken, AccountID: a.Credentials.AccountID, ExpiresAt: a.Credentials.ExpiresAt}, nil
+		}
+	}
+	return Access{}, ErrNotRegistered
+}
+
+type Access struct {
+	Token, AccountID string
+	ExpiresAt        time.Time
+}
+
+func (Access) String() string   { return "[redacted access]" }
+func (Access) GoString() string { return "[redacted access]" }
+
 func (m *Manager) Login(ctx context.Context, slot string, runner Runner, report func(State)) error {
 	return m.login(ctx, slot, runner, report, false)
 }

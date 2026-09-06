@@ -256,3 +256,27 @@ func TestAuthFormatChecks(t *testing.T) {
 		})
 	}
 }
+
+func TestAccessRequiresRegisteredUnexpiredSlot(t *testing.T) {
+	v := &memoryVault{}
+	m := New(v, t.TempDir())
+	if _, err := m.Access("a", time.Now()); !errors.Is(err, ErrNotRegistered) {
+		t.Fatal("missing account accepted")
+	}
+	if err := m.Login(context.Background(), "a", writer("synthetic-a"), nil); err != nil {
+		t.Fatal(err)
+	}
+	access, err := m.Access("a", time.Now())
+	if err != nil || access.Token == "" || access.AccountID != "synthetic-a" {
+		t.Fatal("access unavailable")
+	}
+	if strings.Contains(fmt.Sprintf("%v %+v %#v", access, access, access), "synthetic") {
+		t.Fatal("access formatting leaked")
+	}
+	if _, err := m.Access("a", time.Now().Add(2*time.Hour)); !errors.Is(err, ErrExpired) {
+		t.Fatal("expired credentials accepted")
+	}
+	if v.writes != 1 {
+		t.Fatal("access lookup modified credentials")
+	}
+}
