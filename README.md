@@ -4,7 +4,7 @@ macOS 메뉴바에서 여러 Codex 계정의 사용량과 한도를 확인하고
 
 ## Status
 
-현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 공식 CLI 브라우저 로그인 위임과 네이티브 Keychain 저장을 구현했으며 실제 로그인은 사용자 검증 단계입니다. SwiftUI, live 모델 중계, 사용량/토큰 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
+현재는 Phase 0 구현 단계입니다. Go 기반 Wiki 로컬 검증, 메모리 기반 세션 인계, 단일 시도 HTTP/SSE 프록시와 합성 데모가 있습니다. 실제 CLI 0.153.4로 합성 응답·오류·대화 ID 격리를 검증했습니다. 브라우저 로그인과 Keychain 저장은 사용자 환경에서도 확인했으며, 등록한 단일 계정의 실제 요청을 확인하는 `live-test`를 추가했습니다. 실제 서버 응답은 사용자 검증 대상입니다. SwiftUI, 일반 대화형 CLI 연결, 사용량/토큰 갱신, SQLite 영속화, Codex Wiki 인계 연동은 아직 구현되지 않았습니다.
 
 ## Local development
 
@@ -88,7 +88,7 @@ go build -o bin/switcher-helper ./cmd/switcher-helper
 ./bin/switcher-helper account reauth a
 ```
 
-두 번째 계정은 `account login b`로 추가합니다. 같은 계정의 중복 등록과 잘못된 계정으로의 재인증은 거절합니다. 실제 모델 요청/계정 전환은 아직 테스트할 수 없습니다.
+두 번째 계정은 `account login b`로 추가합니다. 같은 계정의 중복 등록과 잘못된 계정으로의 재인증은 거절합니다. 자동 계정 전환은 아직 테스트할 수 없습니다.
 
 인증 관련 일반 테스트는 합성 데이터만 사용합니다. 네이티브 Keychain 저장을 따로 검사하려면:
 
@@ -97,6 +97,29 @@ SWITCHER_KEYCHAIN_INTEGRATION=1 go test -count=1 -v -timeout 30s ./internal/cred
 ```
 
 이 테스트는 고유 이름의 합성 항목만 만들고 종료 시 삭제합니다. 강제 종료 시 임시 인증 파일 잔류 등의 한계는 [ADR 0013](docs/adr/0013-browser-login-and-keychain.md)에 기록했습니다. 오류가 나면 **오류 코드만 공유하고 auth.json·토큰·인증 URL은 공유하지 마세요.**
+
+## 실제 계정으로 인사 요청 1회 테스트
+
+등록된 `a` 계정으로 테스트합니다. **이 명령은 실제 모델 요청을 보내 계정 사용량을 소모합니다.** 별도 helper 실행이나 전역 Codex 설정 변경은 필요하지 않습니다.
+
+```sh
+go build -o bin/switcher-helper ./cmd/switcher-helper
+./bin/switcher-helper live-test a
+```
+
+내부에서 로컬 프록시와 새 CLI를 열어 “짧게 안녕이라고만 답해줘. 도구를 사용하지 마.”를 보냅니다. 답변과 함께 진단 JSON에 `succeeded: true`, `cli_requests: 1`, `proxy_admissions: 1`, `last_http_status: 200`이 나오면 성공입니다. 준비·실행·종료까지 자동으로 처리하며, 기존 대화나 프로젝트 작업을 이어가는 명령은 아닙니다.
+
+모델을 생략하면 설치된 CLI의 기본 모델을 사용합니다. 기존 config의 모델 선택은 공유하지 않으므로 필요하면 `--model`로 계정에서 사용 가능한 모델명을 지정하세요.
+
+`login_credentials_expired`가 나오면 사용자가 직접 `./bin/switcher-helper account reauth a`를 실행하세요. 실패 시 helper는 자동 재전송하지 않습니다. 재시험 명령을 다시 실행하는 것은 별개의 새 모델 요청입니다. 오류 공유 시 진단 JSON과 오류 코드만 보내고 원본 인증 자료는 보내지 마세요.
+
+실제 토큰을 사용하지 않는 동일 경로의 합성 테스트:
+
+```sh
+SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -v -timeout 100s ./internal/livetest
+```
+
+지원 범위와 backend 경로의 미검증 사항은 [ADR 0014](docs/adr/0014-single-account-live-smoke-test.md)에 기록했습니다.
 
 ## Product principles
 

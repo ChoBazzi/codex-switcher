@@ -13,3 +13,11 @@ func TestAccountCommandRejectsInvalidArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestLiveCommandRejectsInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{nil, {"c"}, {"a", "--unsafe"}, {"a", "--unsafe", "x"}, {"a", "--model", "bad\nmodel"}} {
+		if err := liveCommand(args, io.Discard, io.Discard); err == nil {
+			t.Fatal("invalid live command accepted")
+		}
+	}
+}

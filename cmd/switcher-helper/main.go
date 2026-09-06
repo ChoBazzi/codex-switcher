@@ -24,6 +24,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "live-test" {
+		if err := liveCommand(os.Args[2:], os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "account" {
 		if err := accountCommand(os.Args[2:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err.Error())
