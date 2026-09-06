@@ -224,14 +224,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				panic(http.ErrAbortHandler)
 			}
 			if h.store != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				id := observer.responseID
+				ids := observer.responseIDs
 				if !stream {
-					id = completedID(jsonBody)
+					ids, err = completedRefs(jsonBody)
+					if err != nil {
+						panic(http.ErrAbortHandler)
+					}
 				}
-				if id == "" {
+				if len(ids) == 0 {
 					panic(http.ErrAbortHandler)
 				}
-				if err := h.store.Finish(lease, []string{id}, true, time.Now()); err != nil {
+				if err := h.store.Finish(lease, ids, true, time.Now()); err != nil {
 					panic(http.ErrAbortHandler)
 				}
 			}
@@ -255,7 +258,7 @@ type eventObserver struct {
 	data              []byte
 	completed, failed bool
 	strict            bool
-	responseID        string
+	responseIDs       []string
 }
 
 func (o *eventObserver) feed(b []byte) bool {
@@ -279,11 +282,11 @@ func (o *eventObserver) feed(b []byte) bool {
 				switch event.Type {
 				case "response.completed":
 					if o.strict {
-						id := completedID(event.Response)
-						if id == "" || o.completed {
+						ids, err := completedRefs(event.Response)
+						if err != nil || o.completed {
 							o.failed = true
 						} else {
-							o.responseID = id
+							o.responseIDs = ids
 						}
 					}
 					o.completed = true

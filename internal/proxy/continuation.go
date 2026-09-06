@@ -9,7 +9,7 @@ import (
 
 var errShape = errors.New("unsupported_persistent_request")
 
-func validID(id string) bool { return id != "" && len(id) <= 4096 && !strings.ContainsRune(id, 0) }
+func validID(id string) bool { return id != "" && len(id) <= 4000 && !strings.ContainsAny(id, "\x00:") }
 func completedID(data []byte) string {
 	var response struct {
 		ID     string `json:"id"`
@@ -21,9 +21,8 @@ func completedID(data []byte) string {
 	return response.ID
 }
 
-// Deliberately narrow initial contract: previous_response_id plus text messages.
-// Conversation handles, item references, tool results and unknown top-level
-// fields are rejected rather than guessed or forwarded without ownership checks.
+// Narrow contract: text, previous response, owned item references and function
+// results. Conversation handles and unknown extensions still fail closed.
 func continuationRefs(data []byte) ([]string, error) {
 	if !uniqueJSON(data) {
 		return nil, errShape
@@ -55,6 +54,16 @@ func continuationRefs(data []byte) ([]string, error) {
 		return nil, errShape
 	}
 	for _, item := range items {
+		var kind string
+		_ = json.Unmarshal(item["type"], &kind)
+		if kind == "item_reference" || kind == "function_call_output" || kind == "function_call" {
+			owned, err := toolRefs(item, kind)
+			if err != nil {
+				return nil, err
+			}
+			refs = append(refs, owned...)
+			continue
+		}
 		for k := range item {
 			if k != "type" && k != "role" && k != "content" {
 				return nil, errShape
@@ -78,6 +87,130 @@ func continuationRefs(data []byte) ([]string, error) {
 			if len(p) != 2 || json.Unmarshal(p["type"], &typ) != nil || typ != "input_text" || json.Unmarshal(p["text"], &text) != nil || bytes.Equal(bytes.TrimSpace(p["text"]), []byte("null")) {
 				return nil, errShape
 			}
+		}
+	}
+	return refs, nil
+}
+
+func fieldString(item map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := item[key]
+	var value string
+	returnValue := ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && json.Unmarshal(raw, &value) == nil
+	return value, returnValue
+}
+func toolRefs(item map[string]json.RawMessage, kind string) ([]string, error) {
+	allowed := map[string]bool{"type": true}
+	switch kind {
+	case "item_reference":
+		allowed["id"] = true
+	case "function_call_output":
+		allowed["call_id"] = true
+		allowed["output"] = true
+	case "function_call":
+		for _, k := range []string{"id", "call_id", "name", "arguments", "status"} {
+			allowed[k] = true
+		}
+	}
+	for k := range item {
+		if !allowed[k] {
+			return nil, errShape
+		}
+	}
+	if kind == "item_reference" {
+		id, ok := fieldString(item, "id")
+		if !ok || !validID(id) {
+			return nil, errShape
+		}
+		return []string{"item:" + id}, nil
+	}
+	call, ok := fieldString(item, "call_id")
+	if !ok || !validID(call) {
+		return nil, errShape
+	}
+	refs := []string{"call:function:" + call}
+	if kind == "function_call_output" {
+		if _, ok := fieldString(item, "output"); !ok {
+			return nil, errShape
+		}
+		return refs, nil
+	}
+	if name, ok := fieldString(item, "name"); !ok || name == "" {
+		return nil, errShape
+	}
+	if _, ok := fieldString(item, "arguments"); !ok {
+		return nil, errShape
+	}
+	if _, ok := item["status"]; ok {
+		status, ok := fieldString(item, "status")
+		if !ok || status != "completed" {
+			return nil, errShape
+		}
+	}
+	if _, ok := item["id"]; ok {
+		id, ok := fieldString(item, "id")
+		if !ok || !validID(id) {
+			return nil, errShape
+		}
+		refs = append(refs, "item:"+id)
+	}
+	return refs, nil
+}
+
+// Only the final completed response grants ownership. Partial item events do not.
+// Prefixes separate response, item and function-call identifiers in schema v1.
+func completedRefs(data []byte) ([]string, error) {
+	if !uniqueJSON(data) {
+		return nil, errShape
+	}
+	id := completedID(data)
+	if id == "" {
+		return nil, errShape
+	}
+	var response struct {
+		Output []json.RawMessage `json:"output"`
+	}
+	if json.Unmarshal(data, &response) != nil {
+		return nil, errShape
+	}
+	refs := []string{id}
+	for _, raw := range response.Output {
+		var item map[string]json.RawMessage
+		if json.Unmarshal(raw, &item) != nil || item == nil {
+			return nil, errShape
+		}
+		kind, ok := fieldString(item, "type")
+		if !ok {
+			return nil, errShape
+		}
+		switch kind {
+		case "message", "reasoning", "function_call":
+			if _, ok := item["id"]; ok {
+				itemID, ok := fieldString(item, "id")
+				if !ok || !validID(itemID) {
+					return nil, errShape
+				}
+				refs = append(refs, "item:"+itemID)
+			}
+			if kind == "function_call" {
+				if name, ok := fieldString(item, "name"); !ok || name == "" {
+					return nil, errShape
+				}
+				if _, ok := fieldString(item, "arguments"); !ok {
+					return nil, errShape
+				}
+				if _, exists := item["status"]; exists {
+					status, ok := fieldString(item, "status")
+					if !ok || status != "completed" {
+						return nil, errShape
+					}
+				}
+				call, ok := fieldString(item, "call_id")
+				if !ok || !validID(call) {
+					return nil, errShape
+				}
+				refs = append(refs, "call:function:"+call)
+			}
+		default: // Unknown output is delivered but does not grant tool ownership.
 		}
 	}
 	return refs, nil

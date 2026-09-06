@@ -147,7 +147,7 @@ func TestContinuationContract(t *testing.T) {
 	if _, err := continuationRefs([]byte(`{"input":"x","previous_response_id":"one","previous_response_id":"two"}`)); err == nil {
 		t.Fatal("duplicate continuation key accepted")
 	}
-	for _, body := range []string{`null`, `{"input":null}`, `{"input":"x","conversation":"other"}`, `{"input":[{"type":"item_reference","id":"foreign"}]}`, `{"input":[{"role":"assistant","content":"x"}]}`, `{"input":[{"role":"user","content":[{"type":"input_image","image_url":"x"}]}]}`, `{"input":"x","previous_response_id":123}`} {
+	for _, body := range []string{`null`, `{"input":null}`, `{"input":"x","conversation":"other"}`, `{"input":[{"type":"item_reference"}]}`, `{"input":[{"role":"assistant","content":"x"}]}`, `{"input":[{"role":"user","content":[{"type":"input_image","image_url":"x"}]}]}`, `{"input":"x","previous_response_id":123}`} {
 		if _, err := continuationRefs([]byte(body)); err == nil {
 			t.Fatalf("accepted unsupported shape %s", body)
 		}

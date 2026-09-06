@@ -12,7 +12,7 @@
 
 - 선택적 `proxy.NewPersistent`를 추가한다. 기존 `New`와 demo/live-test 동작은 유지한다. 생성 시 저장소가 필수이며 저장 실패를 메모리 경로로 우회하지 않는다.
 - 신뢰된 resolver는 인증과 함께 검증된 origin 및 내부 슬롯을 반환한다. 영속 라우터가 이 값을 제공한다. 프록시는 저장소 매핑과 이를 비교하고, upstream 호출 전에 `Begin`으로 소유권 검증과 inflight 기록을 완료한다. 알 수 없는 세션을 등록하지 않는다.
-- 초기 요청 계약은 텍스트 입력과 `previous_response_id`다. 문자열 또는 user/developer/system의 텍스트 메시지만 허용한다. conversation, item_reference, 도구 결과, assistant 이력 및 알 수 없는 최상위 필드는 차단한다. 전체 Codex CLI 도구 작업 지원을 의미하지 않는다.
+- 초기 요청 계약은 텍스트 입력과 `previous_response_id`이며, ADR 0019에서 소유권이 확인된 item_reference와 함수 호출/문자열 결과를 추가했다. conversation, assistant 전체 이력 및 알 수 없는 확장은 계속 차단한다. 전체 Codex CLI 도구 작업 지원을 의미하지 않는다.
 - 정상 JSON 응답의 id/status=completed 또는 SSE response.completed의 response.id/status=completed만 응답 소유권으로 저장한다. 스트림은 completed 뒤 EOF까지 확인한다. ID 누락, 중복 completed, incomplete/failed, 읽기 중단, 클라이언트 쓰기 실패는 실패 처리한다. JSON 관찰은 최대 4 MiB, SSE 이벤트 버퍼는 기존 1 MiB 제한을 따른다.
 - 2xx 완료 시 `Finish`를 커밋한 뒤 로컬 요청 상태를 성공으로 바꾼다. 오류/패닉/중단 시 deferred Finish로 blocked를 기록한다. DB 자체가 사용 불가하면 남은 inflight가 재시작 시 blocked로 복구된다. 실패 요청을 다시 전송하지 않는다.
 - 응답 바이트를 전달한 뒤 저장 실패가 발생하면 HTTP 상태를 다시 쓰지 않고 연결을 중단한다. 클라이언트가 이미 완료 이벤트를 보았을 수 있으므로 전송 완료와 로컬 커밋의 원자성을 보장하지 않는다. 다음 요청을 차단하여 보수적으로 처리한다.
