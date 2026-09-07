@@ -25,6 +25,8 @@ type Binding struct {
 	ready           chan struct{}
 	started, closed bool
 	failed          bool
+	handoffID       string
+	snapshot        checkpoint.Snapshot
 }
 
 // New is armed by an explicit launcher invocation containing user input.
@@ -38,6 +40,20 @@ func New(r *routing.Router, origin checkpoint.Origin, secret string, userInput b
 		return nil, ErrBinding
 	}
 	return &Binding{router: r, origin: origin, secret: secret, resume: resume, ready: make(chan struct{})}, nil
+}
+
+// NewHandoff is armed only by an explicit launcher handoff plus user input.
+// It never treats an unknown or invalid reservation as an ordinary session.
+func NewHandoff(r *routing.Router, origin checkpoint.Origin, secret, id string, snap checkpoint.Snapshot, userInput bool) (*Binding, error) {
+	if id == "" {
+		return nil, ErrBinding
+	}
+	b, err := New(r, origin, secret, userInput, "")
+	if err != nil {
+		return nil, err
+	}
+	b.handoffID, b.snapshot = id, snap
+	return b, nil
 }
 func validID(id string) bool {
 	h := http.Header{}
@@ -62,7 +78,11 @@ func (b *Binding) Started(id string) error {
 		return ErrBinding
 	}
 	b.origin.Session = id
-	if b.resume == "" {
+	if b.handoffID != "" {
+		if _, err := b.router.BindHandoff(b.handoffID, b.origin, b.snapshot, true, time.Now()); err != nil {
+			return ErrBinding
+		}
+	} else if b.resume == "" {
 		if _, err := b.router.Register(b.origin, true, time.Now()); err != nil {
 			return ErrBinding
 		}

@@ -67,7 +67,7 @@ func (s *Store) initialize() error {
 	if err != nil || len(rows) != 1 {
 		return ErrStorage
 	}
-	if rows[0][0] != "0" && rows[0][0] != "1" {
+	if rows[0][0] != "0" && rows[0][0] != "1" && rows[0][0] != "2" {
 		return ErrStorage
 	}
 	return s.transaction(func() error {
@@ -75,8 +75,10 @@ func (s *Store) initialize() error {
 			`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT NOT NULL, worktree TEXT NOT NULL, branch TEXT NOT NULL, slot TEXT NOT NULL CHECK(slot IN ('a','b')), last_seen INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','inflight','blocked')), request TEXT NOT NULL DEFAULT '')`,
 			`CREATE TABLE IF NOT EXISTS responses (id TEXT PRIMARY KEY, session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE)`,
 			`CREATE INDEX IF NOT EXISTS sessions_last_seen ON sessions(last_seen)`,
+			`CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, source TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, target TEXT NOT NULL CHECK(target IN ('a','b')), checkpoint TEXT NOT NULL, digest TEXT NOT NULL, consumed_by TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS handoffs_pending_source ON handoffs(source) WHERE consumed_by=''`,
 			`UPDATE sessions SET state='blocked',request='' WHERE state='inflight'`,
-			`PRAGMA user_version=1`,
+			`PRAGMA user_version=2`,
 		} {
 			if _, err := s.db.query(q); err != nil {
 				return err
@@ -177,6 +179,13 @@ func (s *Store) Ready(o checkpoint.Origin) error {
 	if state != "ready" {
 		return ErrBlocked
 	}
+	rows, err := s.db.query("SELECT id FROM handoffs WHERE source=? AND consumed_by=''", o.Session)
+	if err != nil {
+		return err
+	}
+	if len(rows) != 0 {
+		return ErrBlocked
+	}
 	return nil
 }
 
@@ -201,6 +210,13 @@ func (s *Store) BeginWithInputs(o checkpoint.Origin, refs, inputs []string, now 
 			return ErrUnknown
 		}
 		if state != "ready" {
+			return ErrBlocked
+		}
+		pending, err := s.db.query("SELECT id FROM handoffs WHERE source=? AND consumed_by=''", o.Session)
+		if err != nil {
+			return err
+		}
+		if len(pending) != 0 {
 			return ErrBlocked
 		}
 		for _, id := range refs {

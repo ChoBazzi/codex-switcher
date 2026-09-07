@@ -243,6 +243,19 @@ func validate(b []byte, want Metadata) error {
 	return nil
 }
 
+// CheckBytes validates a manually selected candidate without starting a timer.
+// The caller must verify the persisted request state and source before calling.
+func CheckBytes(b []byte, want Metadata) (Snapshot, error) {
+	if len(b) > MaxBytes {
+		return Snapshot{}, ErrSize
+	}
+	if err := validate(b, want); err != nil {
+		return Snapshot{}, err
+	}
+	hash := sha256.Sum256(b)
+	return Snapshot{want, string(b), hex.EncodeToString(hash[:]), time.Now()}, nil
+}
+
 // Format produces a file template for the Codex instruction and test fixtures.
 // Callers must publish a completed file atomically, not stream into checkpoint.md.
 func Format(meta Metadata, goal, changes, decisions, todo string) []byte {
