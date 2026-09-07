@@ -45,7 +45,11 @@ type runnerFunc func(context.Context, string, func()) error
 func (f runnerFunc) Run(c context.Context, d string, w func()) error { return f(c, d, w) }
 
 func syntheticAuth(id string, expires time.Time) []byte {
-	payload, _ := json.Marshal(map[string]any{"exp": expires.Unix(), "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": id}})
+	return syntheticUserAuth(id, "user-"+id, expires)
+}
+
+func syntheticUserAuth(id, user string, expires time.Time) []byte {
+	payload, _ := json.Marshal(map[string]any{"exp": expires.Unix(), "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": id, "chatgpt_user_id": user}})
 	access := "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(payload) + ".synthetic"
 	data, _ := json.Marshal(map[string]any{"auth_mode": "chatgpt", "tokens": map[string]string{"access_token": access, "refresh_token": "synthetic-refresh-secret", "id_token": "synthetic-id-token", "account_id": id}})
 	return data

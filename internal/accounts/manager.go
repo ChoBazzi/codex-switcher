@@ -81,13 +81,24 @@ func (m *Manager) read() (registry, error) {
 	if len(data) > credentialstore.MaxBytes || json.Unmarshal(data, &r) != nil || r.Version != 1 || len(r.Accounts) > 2 {
 		return registry{}, ErrStore
 	}
-	slots, ids := map[string]bool{}, map[string]bool{}
-	for _, a := range r.Accounts {
+	slots := map[string]bool{}
+	for i, a := range r.Accounts {
 		c := a.Credentials
-		if !validSlot(a.Slot) || slots[a.Slot] || ids[c.AccountID] || !safeValue(c.AccountID, 256) || !safeValue(c.AccessToken, 32<<10) || !safeValue(c.RefreshToken, 8192) || !safeValue(c.IDToken, 32<<10) || c.ExpiresAt.IsZero() {
+		if !validSlot(a.Slot) || slots[a.Slot] || !safeValue(c.AccountID, 256) || !safeValue(c.AccessToken, 32<<10) || !safeValue(c.RefreshToken, 8192) || !safeValue(c.IDToken, 32<<10) || c.ExpiresAt.IsZero() {
 			return registry{}, ErrStore
 		}
-		slots[a.Slot], ids[c.AccountID] = true, true
+		claims, err := accessClaims(c.AccessToken)
+		if err != nil || claims.Auth.Account != "" && claims.Auth.Account != c.AccountID || claims.Auth.User != "" && !safeValue(claims.Auth.User, 256) {
+			return registry{}, ErrStore
+		}
+		c.UserID = claims.Auth.User
+		for _, previous := range r.Accounts[:i] {
+			if previous.Credentials.AccountID == c.AccountID && (sameIdentity(previous.Credentials, c) || previous.Credentials.UserID == "" || c.UserID == "") {
+				return registry{}, ErrStore
+			}
+		}
+		r.Accounts[i].Credentials = c
+		slots[a.Slot] = true
 	}
 	return r, nil
 }
@@ -231,12 +242,22 @@ func (m *Manager) login(ctx context.Context, slot string, runner Runner, report 
 	if !c.ExpiresAt.After(time.Now().Add(30 * time.Second)) {
 		return ErrExpired
 	}
-	if replace && r.Accounts[index].Credentials.AccountID != c.AccountID {
-		return ErrMismatch
+	if replace {
+		if r.Accounts[index].Credentials.UserID == "" {
+			return ErrIdentity
+		}
+		if !sameIdentity(r.Accounts[index].Credentials, c) {
+			return ErrMismatch
+		}
 	}
 	for _, a := range r.Accounts {
 		if a.Slot != slot && a.Credentials.AccountID == c.AccountID {
-			return ErrDuplicate
+			if a.Credentials.UserID == "" {
+				return ErrIdentity
+			}
+			if sameIdentity(a.Credentials, c) {
+				return ErrDuplicate
+			}
 		}
 	}
 	// Remove plaintext before committing to Keychain. Failure never falls back.

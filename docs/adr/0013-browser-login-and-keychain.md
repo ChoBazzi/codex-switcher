@@ -20,7 +20,7 @@
 - macOS Security/CoreFoundation API를 cgo로 호출한다. 서비스 `com.bazzi.codex-switcher.accounts.v1`, account `registry`의 단일 generic-password 항목에 버전과 두 슬롯의 인증 자료를 저장한다. 실제 계정 ID는 Keychain 내부 데이터에만 들어가며 항목 이름에 사용하지 않는다. iCloud 동기화는 비활성화한다.
 - 새 외부 Go 패키지는 추가하지 않는다. 대안인 `/usr/bin/security ... -w TOKEN`은 프로세스 인자 노출 위험 때문에 쓰지 않는다. native 코드 빌드에 Xcode Command Line Tools와 CGO가 필요하다. 다른 OS 또는 CGO 비활성 환경에서는 명시적으로 실패하며 파일 저장 fallback이 없다.
 - 상태 조회는 슬롯 등록 여부와 만료 시각만 반환한다. `stored_unverified`는 저장됐다는 뜻이고 인증 정상·사용량 가용 상태를 뜻하지 않는다. 자동 토큰 갱신은 아직 구현하지 않는다.
-- 기존 슬롯은 login으로 덮어쓰지 않는다. 명시적 reauth는 동일 account ID에만 반영한다. 다른 슬롯의 같은 계정은 중복 등록하지 않으며 저장소 손상·접근 실패 시 초기화/덮어쓰기를 하지 않는다.
+- 기존 슬롯은 login으로 덮어쓰지 않는다. ADR 0026에 따라 명시적 reauth는 사용자 ID와 account ID가 모두 같은 경우에만 반영한다. 다른 슬롯의 같은 조합은 중복 등록하지 않으며 저장소 손상·접근 실패 시 초기화/덮어쓰기를 하지 않는다.
 
 ## 검증
 
