@@ -1,0 +1,47 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"github.com/ChoBazzi/codex-switcher/internal/proxy"
+	"io"
+	"strings"
+	"testing"
+)
+
+func TestExecRejectsInvalidArguments(t *testing.T) {
+	for _, args := range [][]string{nil, {" "}, {"a", "b"}, {"--unknown"}, {"--model", "bad\nmodel", "synthetic"}, {"--checkpoint"}, {"--checkpoint", "--resume", "00000000000000000000000000000000", "extra prompt"}} {
+		if execCommand(args, io.Discard, io.Discard) == nil {
+			t.Fatal("invalid arguments accepted")
+		}
+	}
+}
+
+func TestExecDiagnostics(t *testing.T) {
+	var out bytes.Buffer
+	d := proxy.Diagnostics{Requests: 1, Attempts: 0, Status: 400, Rejection: "unsupported_persistent_request"}
+	if writeExecDiagnostics(&out, d, errors.New("synthetic-secret")) != nil {
+		t.Fatal("write failed")
+	}
+	var event map[string]any
+	if json.Unmarshal(out.Bytes(), &event) != nil || event["succeeded"] != false || event["local_rejection_code"] != d.Rejection || event["cli_stage"] != "run_or_cleanup_failed" {
+		t.Fatal("invalid diagnostic")
+	}
+	if strings.Contains(out.String(), "synthetic-secret") {
+		t.Fatal("error leaked")
+	}
+}
+
+func TestExecHandoffRejectsAmbiguousInvocation(t *testing.T) {
+	for _, args := range [][]string{
+		{"--handoff", "", "synthetic"},
+		{"--handoff", "synthetic"},
+		{"--handoff", "synthetic", "--resume", "00000000000000000000000000000000", "synthetic"},
+		{"--handoff", "synthetic", "--checkpoint", "--resume", "00000000000000000000000000000000"},
+	} {
+		if execCommand(args, io.Discard, io.Discard) == nil {
+			t.Fatal("ambiguous handoff accepted")
+		}
+	}
+}
