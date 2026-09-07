@@ -13,8 +13,10 @@ import (
 const Reply = "Synthetic proxy demo; no model called."
 
 type Upstream struct {
-	Scenario string
-	Calls    atomic.Int64
+	Scenario          string
+	Calls             atomic.Int64
+	CompactCompletion bool
+	EmptyLogprobs     bool
 }
 
 func ValidScenario(s string) bool {
@@ -49,6 +51,9 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).Flush()
 	}
 	part := map[string]any{"type": "output_text", "text": Reply, "annotations": []any{}}
+	if u.EmptyLogprobs {
+		part["logprobs"] = []any{}
+	}
 	item := map[string]any{"id": "msg_synthetic", "type": "message", "role": "assistant", "status": "completed", "content": []any{part}}
 	emit("response.created", map[string]any{"response": map[string]any{"id": "resp_synthetic", "object": "response", "status": "in_progress", "output": []any{}}})
 	emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "msg_synthetic", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
@@ -60,5 +65,9 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	emit("response.output_text.done", map[string]any{"item_id": "msg_synthetic", "output_index": 0, "content_index": 0, "text": Reply})
 	emit("response.content_part.done", map[string]any{"item_id": "msg_synthetic", "output_index": 0, "content_index": 0, "part": part})
 	emit("response.output_item.done", map[string]any{"output_index": 0, "item": item})
-	emit("response.completed", map[string]any{"response": map[string]any{"id": "resp_synthetic", "object": "response", "status": "completed", "output": []any{item}, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
+	output := []any{item}
+	if u.CompactCompletion {
+		output = []any{}
+	}
+	emit("response.completed", map[string]any{"response": map[string]any{"id": "resp_synthetic", "object": "response", "status": "completed", "output": output, "usage": map[string]int{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
 }

@@ -98,7 +98,7 @@ func TestPersistentProxyOwnershipAndRestart(t *testing.T) {
 	}
 }
 func TestPersistentProxyFailureSurvivesRestart(t *testing.T) {
-	for _, scenario := range []string{"429", "partial", "invalid-completed", "invalid-json"} {
+	for _, scenario := range []string{"429", "partial", "invalid-completed", "invalid-json", "duplicate-completed", "failed-after-completed"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "private")
 			db, err := affinity.Open(dir)
@@ -111,6 +111,15 @@ func TestPersistentProxyFailureSurvivesRestart(t *testing.T) {
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				switch scenario {
+				case "duplicate-completed", "failed-after-completed":
+					w.Header().Set("Content-Type", "text/event-stream")
+					complete := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",\"status\":\"completed\"}}\n\n"
+					fmt.Fprint(w, complete)
+					if scenario == "duplicate-completed" {
+						fmt.Fprint(w, complete)
+					} else {
+						fmt.Fprint(w, "data: {\"type\":\"response.failed\"}\n\n")
+					}
 				case "429":
 					w.WriteHeader(429)
 				case "partial":

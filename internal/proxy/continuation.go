@@ -11,6 +11,34 @@ import (
 
 var errShape = errors.New("unsupported_persistent_request")
 
+func mergeResponseRefs(groups ...[]string) []string {
+	seen := make(map[string]bool)
+	var refs []string
+	for _, group := range groups {
+		for _, ref := range group {
+			if !seen[ref] {
+				seen[ref] = true
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs
+}
+
+// Completion errors carry only local field classifications, never server values.
+type completionShapeError string
+
+func (e completionShapeError) Error() string { return string(e) }
+func (e completionShapeError) Unwrap() error { return errShape }
+
+func completionReason(err error) string {
+	var shape completionShapeError
+	if errors.As(err, &shape) {
+		return string(shape)
+	}
+	return "completion_fields_invalid"
+}
+
 func validID(id string) bool { return id != "" && len(id) <= 4000 && !strings.ContainsAny(id, "\x00:") }
 func completedID(data []byte) string {
 	var response struct {
@@ -229,58 +257,71 @@ func toolRefs(item map[string]json.RawMessage, kind string) ([]string, error) {
 // Prefixes separate response, item and function-call identifiers in schema v1.
 func completedRefs(data []byte) ([]string, error) {
 	if !uniqueJSON(data) {
-		return nil, errShape
+		return nil, completionShapeError("completion_json_invalid")
 	}
-	id := completedID(data)
-	if id == "" {
-		return nil, errShape
+	var object map[string]json.RawMessage
+	if json.Unmarshal(data, &object) != nil || object == nil {
+		return nil, completionShapeError("completion_object_invalid")
+	}
+	if raw, ok := object["error"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, completionShapeError("completion_error_present")
+	}
+	status, ok := fieldString(object, "status")
+	if !ok || status != "completed" {
+		return nil, completionShapeError("completion_status_invalid")
+	}
+	id, ok := fieldString(object, "id")
+	if !ok || !validID(id) {
+		return nil, completionShapeError("completion_id_invalid")
 	}
 	var response struct {
 		Output []json.RawMessage `json:"output"`
 	}
 	if json.Unmarshal(data, &response) != nil {
-		return nil, errShape
+		return nil, completionShapeError("completion_output_invalid")
 	}
 	refs := []string{id}
 	for _, raw := range response.Output {
 		var item map[string]json.RawMessage
 		if json.Unmarshal(raw, &item) != nil || item == nil {
-			return nil, errShape
+			return nil, completionShapeError("completion_item_invalid")
 		}
 		kind, ok := fieldString(item, "type")
 		if !ok {
-			return nil, errShape
+			return nil, completionShapeError("completion_item_type_invalid")
 		}
 		switch kind {
 		case "message", "reasoning", "function_call":
 			if kind == "reasoning" || kind == "message" {
-				if key, err := historyKey(item); err == nil {
-					refs = append(refs, key)
+				key, err := historyKey(item)
+				if err != nil {
+					return nil, completionShapeError("completion_history_invalid")
 				}
+				refs = append(refs, key)
 			}
 			if _, ok := item["id"]; ok {
 				itemID, ok := fieldString(item, "id")
 				if !ok || !validID(itemID) {
-					return nil, errShape
+					return nil, completionShapeError("completion_item_id_invalid")
 				}
 				refs = append(refs, "item:"+itemID)
 			}
 			if kind == "function_call" {
 				if name, ok := fieldString(item, "name"); !ok || name == "" {
-					return nil, errShape
+					return nil, completionShapeError("completion_function_name_invalid")
 				}
 				if _, ok := fieldString(item, "arguments"); !ok {
-					return nil, errShape
+					return nil, completionShapeError("completion_function_arguments_invalid")
 				}
 				if _, exists := item["status"]; exists {
 					status, ok := fieldString(item, "status")
 					if !ok || status != "completed" {
-						return nil, errShape
+						return nil, completionShapeError("completion_function_status_invalid")
 					}
 				}
 				call, ok := fieldString(item, "call_id")
 				if !ok || !validID(call) {
-					return nil, errShape
+					return nil, completionShapeError("completion_call_id_invalid")
 				}
 				refs = append(refs, "call:function:"+call)
 			}
@@ -336,6 +377,21 @@ func historyKey(item map[string]json.RawMessage) (string, error) {
 		d.UseNumber()
 		if d.Decode(&v) != nil {
 			return "", errShape
+		}
+		// CLI resume omits empty annotations/logprobs. Non-empty values remain
+		// bound to the original content and must never be silently discarded.
+		if kind == "message" && k == "content" {
+			if parts, ok := v.([]any); ok {
+				for _, part := range parts {
+					if p, ok := part.(map[string]any); ok {
+						for _, field := range []string{"annotations", "logprobs"} {
+							if values, ok := p[field].([]any); ok && len(values) == 0 {
+								delete(p, field)
+							}
+						}
+					}
+				}
+			}
 		}
 		canonical[k] = v
 	}
