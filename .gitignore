@@ -38,6 +38,7 @@ auth.json
 
 # LLM Wiki operational session data
 .wiki/.sessions/
+.codex-switcher/
 
 # IDE
 .idea/
