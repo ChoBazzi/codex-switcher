@@ -34,14 +34,17 @@ type Handler struct {
 	// BeforeAttempt is configured before serving by the trusted launcher.
 	// It cannot add an upstream attempt and may reject dispatch locally.
 	BeforeAttempt func() error
-	target        string
-	resolve       Resolver
-	transport     *http.Transport
-	mu            sync.Mutex
-	busy          map[string]bool
-	blocked       map[string]bool
-	store         *affinity.Store
-	diagnostic    Diagnostics
+	// Optional native compact endpoint for a non-persistent trusted adapter.
+	// Validate the complete bounded JSON window before any success bytes leave.
+	ValidateCompaction func([]byte) error
+	target             string
+	resolve            Resolver
+	transport          *http.Transport
+	mu                 sync.Mutex
+	busy               map[string]bool
+	blocked            map[string]bool
+	store              *affinity.Store
+	diagnostic         Diagnostics
 }
 
 // Diagnostics contains only local constants and counters, never upstream text.
@@ -193,7 +196,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.diagnostic.CompletionRejection = ""
 	h.diagnostic.CompletionSeen, h.diagnostic.CompletionCommitted = false, false
 	h.mu.Unlock()
-	if r.Method != http.MethodPost || r.URL.Path != "/responses" || r.URL.RawQuery != "" {
+	compact := r.URL.Path == "/responses/compact" && h.ValidateCompaction != nil && h.store == nil
+	if r.Method != http.MethodPost || (r.URL.Path != "/responses" && !compact) || r.URL.RawQuery != "" {
 		h.reject(w, 404, "unsupported_route")
 		return
 	}
@@ -249,7 +253,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	out, err := http.NewRequestWithContext(ctx, http.MethodPost, h.target, bytes.NewReader(body))
+	target := h.target
+	if compact {
+		target = strings.TrimRight(target, "/") + "/compact"
+	}
+	out, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		h.reject(w, 502, "upstream_unavailable")
 		return
@@ -305,6 +313,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if compact {
+		if resp.StatusCode != http.StatusOK {
+			h.reject(w, resp.StatusCode, "compaction_upstream_failed")
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+		if err != nil || len(data) > 4<<20 || (format != "json" && format != "missing") || !json.Valid(data) || h.ValidateCompaction(data) != nil {
+			h.reject(w, 502, "compaction_response_invalid")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write(data); err != nil {
+			return
+		}
+		failed = false
+		h.responseDiagnostic("", true, true)
+		return
+	}
 	if h.store != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		failed = !h.deliverPersistent(w, resp, lease, stream)
 		return
