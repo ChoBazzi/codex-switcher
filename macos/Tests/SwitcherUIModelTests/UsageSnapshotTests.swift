@@ -2,6 +2,20 @@ import XCTest
 @testable import SwitcherUIModel
 
 final class UsageSnapshotTests: XCTestCase {
+    func testRegisteredAccountCanLogoutWithoutQuota() {
+        var account = AccountSnapshot.empty("a")
+        XCTAssertFalse(account.canLogoutAccount)
+        account.registered = true
+        XCTAssertTrue(account.canLogoutAccount)
+        for state in ["unknown", "fetch_error", "auth_error", "auth_expired", "limit_reached"] {
+            account.state = state
+            XCTAssertTrue(account.canLogoutAccount)
+        }
+        account.registered = false
+        XCTAssertFalse(account.canLogoutAccount)
+        account.state = "not_registered"
+        XCTAssertFalse(account.canLogoutAccount)
+    }
     private func sample(_ a: String = "24", state: String = "ok", stale: Bool = false,
                         success: String = "\"2026-09-07T14:00:00.123456Z\"") -> Data {
         Data("""

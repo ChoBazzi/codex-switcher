@@ -30,6 +30,11 @@ public struct AccountSnapshot: Decodable, Equatable, Identifiable {
     public var stale: Bool
     public var usage: UsageData?
 
+    // Unknown quota does not mean the locally stored credentials are absent.
+    public var canLogoutAccount: Bool {
+        registered != false && (registered == true || !["unknown", "not_registered"].contains(state))
+    }
+
     public func isStale(at now: Date) -> Bool {
         stale || lastSuccess == nil || now.timeIntervalSince(lastSuccess!) >= 120
     }

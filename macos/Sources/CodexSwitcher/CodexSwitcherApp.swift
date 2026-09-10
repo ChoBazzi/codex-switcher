@@ -389,7 +389,7 @@ struct MenuPanel: View {
         let stale = account.isStale(at: store.now)
         let selected = store.demo ? account.slot == "a" : direct.ready && direct.slot == account.slot
         let canLogout = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
-            && !["unknown", "not_registered"].contains(account.state)
+            && account.canLogoutAccount
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("계정 \(account.slot.uppercased())").font(.subheadline.weight(.semibold))
@@ -429,7 +429,7 @@ struct MenuPanel: View {
                 } else {
                     Text("사용량 미확인").font(.caption2).foregroundStyle(.secondary)
                 }
-                if !store.demo, !["unknown", "not_registered"].contains(account.state) {
+                if !store.demo, account.canLogoutAccount {
                     Button("로그아웃") { logoutConfirmation.begin(slot: account.slot) }
                         .disabled(!canLogout || logoutConfirmation.slot != nil)
                 }
@@ -443,7 +443,7 @@ struct MenuPanel: View {
 
     private func logoutPanel(_ slot: String) -> some View {
         let allowed = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
-            && store.accounts.contains { $0.slot == slot && !["unknown", "not_registered"].contains($0.state) }
+            && store.accounts.contains { $0.slot == slot && $0.canLogoutAccount }
         return VStack(alignment: .leading, spacing: 6) {
             Text("계정 \(slot.uppercased()) 연결을 해제할까요?").font(.subheadline.weight(.semibold))
             Text("저장된 인증과 기존 세션 재개·관련 인계 예약을 무효화합니다. 대화·Wiki 파일, 다른 계정 인증과 브라우저 로그인은 유지됩니다.")

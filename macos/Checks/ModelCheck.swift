@@ -4,6 +4,13 @@ import Foundation
 @main
 enum ModelCheck {
     static func main() throws {
+        var unknownAccount = AccountSnapshot.empty("a")
+        precondition(!unknownAccount.canLogoutAccount)
+        unknownAccount.registered = true
+        precondition(unknownAccount.canLogoutAccount)
+        unknownAccount.registered = false
+        precondition(!unknownAccount.canLogoutAccount)
+        print("PASS registered account logout independent of unknown quota")
         var logout = LogoutConfirmation()
         logout.begin(slot: "invalid")
         precondition(logout.slot == nil)
