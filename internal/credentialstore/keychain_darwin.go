@@ -20,7 +20,7 @@ static CFMutableDictionaryRef query(const char *service) {
     return q;
 }
 
-static OSStatus read_secret(const char *service, void **out, long *length) {
+static OSStatus read_secret(const char *service, void **out, long *length, long max_bytes) {
     CFMutableDictionaryRef q = query(service);
     CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
@@ -34,7 +34,7 @@ static OSStatus read_secret(const char *service, void **out, long *length) {
     }
     CFDataRef data = (CFDataRef)result;
     *length = CFDataGetLength(data);
-    if (*length <= 0 || *length > 131072) { CFRelease(result); return errSecDecode; }
+    if (*length <= 0 || *length > max_bytes) { CFRelease(result); return errSecDecode; }
     *out = malloc(*length);
     if (!*out) { CFRelease(result); return errSecAllocate; }
     memcpy(*out, CFDataGetBytePtr(data), *length);
@@ -84,7 +84,8 @@ func (k *Keychain) Read() ([]byte, error) {
 	defer C.free(unsafe.Pointer(s))
 	var data unsafe.Pointer
 	var length C.long
-	status := C.read_secret(s, &data, &length)
+	// Keep the native allocation/read boundary identical to the Go write limit.
+	status := C.read_secret(s, &data, &length, C.long(MaxBytes))
 	if status == C.errSecItemNotFound {
 		return nil, ErrNotFound
 	}

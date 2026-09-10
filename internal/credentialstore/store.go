@@ -4,7 +4,8 @@ package credentialstore
 
 import "errors"
 
-const MaxBytes = 128 << 10
+// Five bounded credential records, including access and ID tokens.
+const MaxBytes = 512 << 10
 const Service = "com.bazzi.codex-switcher.accounts.v1"
 
 var (
