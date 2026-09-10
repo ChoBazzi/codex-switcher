@@ -87,6 +87,15 @@ func TestPrepareAndCancelCommands(t *testing.T) {
 		t.Fatal("prepare result invalid")
 	}
 	id := event["handoff_id"].(string)
+	var status bytes.Buffer
+	statusArgs := []string{"status", "-C", dir, "--conversation", handle, "--checkpoint", cp}
+	if err := handoffCommandWithUsage(statusArgs, &status, handoffAuth{}, quota); err != nil {
+		t.Fatal(err)
+	}
+	var statusEvent map[string]any
+	if json.Unmarshal(status.Bytes(), &statusEvent) != nil || statusEvent["state"] != "pending" || statusEvent["handoff_id"] != id || quota.calls != 1 {
+		t.Fatal("status did not recover exact reservation without network")
+	}
 	if err := checkpointCommand([]string{"recheck", "-C", dir, "--conversation", handle, "--id", cp}, &out); err == nil {
 		t.Fatal("reserved checkpoint rechecked")
 	}
@@ -95,6 +104,13 @@ func TestPrepareAndCancelCommands(t *testing.T) {
 	}
 	if quota.calls != 1 {
 		t.Fatal("cancel made usage request")
+	}
+	status.Reset()
+	if err := handoffCommandWithUsage(statusArgs, &status, handoffAuth{}, quota); err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal(status.Bytes(), &statusEvent) != nil || statusEvent["state"] != "absent" || quota.calls != 1 {
+		t.Fatal("cancelled status invalid")
 	}
 	db, err = affinity.Open(filepath.Join(base, "affinity"))
 	if err != nil {

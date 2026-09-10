@@ -67,6 +67,15 @@ func TestPersistentHandoffAtomicBinding(t *testing.T) {
 	if err != nil || r.ConsumedBy == "" {
 		t.Fatal("consumption not persisted")
 	}
+	resolved, found, err := db.FindHandoff(origin("source"), "checkpoint")
+	if err != nil || !found || resolved != r {
+		t.Fatal("consumed reservation lookup failed")
+	}
+	foreign := origin("source")
+	foreign.Worktree = "foreign"
+	if _, _, err := db.FindHandoff(foreign, "checkpoint"); err == nil {
+		t.Fatal("foreign origin resolved")
+	}
 	newSession, err := db.Lookup(r.ConsumedBy)
 	if err != nil || newSession.Account != "b" {
 		t.Fatal("wrong target account")
@@ -85,6 +94,30 @@ func TestPersistentHandoffAtomicBinding(t *testing.T) {
 	db = openTest(t, dir)
 	if _, err := db.BindHandoff(r.ID, origin("another"), true, now); err == nil {
 		t.Fatal("consumed reservation replayed after restart")
+	}
+}
+
+func TestLogoutInvalidatesOnlyRelatedRouting(t *testing.T) {
+	db := openTest(t, filepath.Join(t.TempDir(), "db"))
+	defer db.Close()
+	now := time.Now()
+	register(t, db, "source", "a", now)
+	register(t, db, "other", "b", now)
+	r, err := db.PrepareHandoff(origin("source"), "b", "cp", strings.Repeat("a", 64), true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InvalidateSlot("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ready(origin("source")); err == nil {
+		t.Fatal("old source can resume")
+	}
+	if err := db.Ready(origin("other")); err != nil {
+		t.Fatal("unrelated session blocked")
+	}
+	if _, err := db.Handoff(r.ID); err == nil {
+		t.Fatal("pending handoff retained")
 	}
 }
 

@@ -1,10 +1,11 @@
-// Package accounts manages two local account slots without exposing credentials.
+// Package accounts manages up to five local account slots without exposing credentials.
 package accounts
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 )
 
 var (
-	ErrSlot          = errors.New("account_slot_must_be_a_or_b")
+	ErrSlot          = errors.New("account_slot_must_be_a_to_e")
 	ErrOccupied      = errors.New("account_slot_already_registered")
 	ErrDuplicate     = errors.New("account_already_registered")
 	ErrStore         = errors.New("account_store_unavailable")
@@ -78,7 +79,7 @@ func (m *Manager) read() (registry, error) {
 		return r, ErrStore
 	}
 	defer clear(data)
-	if len(data) > credentialstore.MaxBytes || json.Unmarshal(data, &r) != nil || r.Version != 1 || len(r.Accounts) > 2 {
+	if len(data) > credentialstore.MaxBytes || json.Unmarshal(data, &r) != nil || r.Version != 1 || len(r.Accounts) > accountslot.Capacity {
 		return registry{}, ErrStore
 	}
 	slots := map[string]bool{}
@@ -110,7 +111,10 @@ func (m *Manager) Status() ([]Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	statuses := []Status{{Slot: "a", State: "not_registered"}, {Slot: "b", State: "not_registered"}}
+	statuses := make([]Status, accountslot.Capacity)
+	for i, slot := range accountslot.All() {
+		statuses[i] = Status{Slot: slot, State: "not_registered"}
+	}
 	for i := range statuses {
 		for _, a := range r.Accounts {
 			if a.Slot == statuses[i].Slot {
@@ -124,6 +128,36 @@ func (m *Manager) Status() ([]Status, error) {
 		}
 	}
 	return statuses, nil
+}
+
+// Logout forgets one slot only. The caller holds the account operation lock
+// and invalidates that slot's routing before replacing credentials.
+func (m *Manager) Logout(slot string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validSlot(slot) {
+		return ErrSlot
+	}
+	r, err := m.read()
+	if err != nil {
+		return err
+	}
+	for i, account := range r.Accounts {
+		if account.Slot != slot {
+			continue
+		}
+		r.Accounts = append(r.Accounts[:i], r.Accounts[i+1:]...)
+		encoded, err := json.Marshal(r)
+		if err != nil {
+			return ErrStore
+		}
+		defer clear(encoded)
+		if m.vault.Write(encoded) != nil {
+			return ErrStore
+		}
+		return nil
+	}
+	return nil
 }
 
 // Access returns only the credentials required for a model request, never the
@@ -283,7 +317,7 @@ func (m *Manager) login(ctx context.Context, slot string, runner Runner, report 
 	return nil
 }
 
-func validSlot(s string) bool { return s == "a" || s == "b" }
+func validSlot(s string) bool { return accountslot.Valid(s) }
 
 func readAuth(dir string) ([]byte, error) {
 	root, err := os.OpenRoot(dir)

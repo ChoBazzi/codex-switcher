@@ -88,7 +88,7 @@ func TestUnavailableSamples(t *testing.T) {
 		func(s *usage.Snapshot) { *s.Usage.LimitReached = true },
 		func(s *usage.Snapshot) { s.Usage.Secondary.UsedPercent = nil },
 		func(s *usage.Snapshot) { s.Usage.Primary.ResetAt = &now },
-		func(s *usage.Snapshot) { *s.Usage.Primary.UsedPercent = 90 },
+		func(s *usage.Snapshot) { *s.Usage.Primary.UsedPercent = 100 },
 	} {
 		r, _ := New(&source{}, 90)
 		s := sample("a", 0, now)
@@ -97,6 +97,33 @@ func TestUnavailableSamples(t *testing.T) {
 		if _, err := r.Register(origin("one"), true, now); !errors.Is(err, ErrUnavailable) {
 			t.Fatal("unsafe new-session admission")
 		}
+	}
+}
+
+func TestNewSessionAcceptsPositiveQuotaBelowCheckpoint(t *testing.T) {
+	for _, used := range []float64{90, 95, 99.9} {
+		now := time.Now()
+		r, _ := New(&source{}, 90)
+		r.Update([]usage.Snapshot{sample("a", used, now), sample("b", 100, now)})
+		s, err := r.Register(origin("low-quota"), true, now)
+		if err != nil || s.Account != "a" {
+			t.Fatalf("used=%v: %v", used, err)
+		}
+	}
+}
+
+func TestRegistrationAvailabilityReasons(t *testing.T) {
+	now := time.Now()
+	r, _ := New(&source{}, 90)
+	if _, err := r.Register(origin("missing"), true, now); !errors.Is(err, ErrUsageUnavailable) {
+		t.Fatal(err)
+	}
+	auth := &source{}
+	auth.expired.Store(true)
+	r, _ = New(auth, 90)
+	r.Update([]usage.Snapshot{sample("a", 0, now), sample("b", 100, now)})
+	if _, err := r.Register(origin("expired"), true, now); !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Fatal(err)
 	}
 }
 func TestSnapshotIsolationAndOrdering(t *testing.T) {

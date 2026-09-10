@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"log"
 	"net"
@@ -25,9 +26,9 @@ import (
 
 func liveCommand(args []string, out, diagnostics io.Writer) error {
 	if len(args) != 1 && len(args) != 3 {
-		return errors.New("usage: switcher-helper live-test a|b [--model MODEL]")
+		return errors.New("usage: switcher-helper live-test a|b|c|d|e [--model MODEL]")
 	}
-	if args[0] != "a" && args[0] != "b" || len(args) == 3 && args[1] != "--model" {
+	if !accountslot.Valid(args[0]) || len(args) == 3 && args[1] != "--model" {
 		return errors.New("invalid_live_test_arguments")
 	}
 	model := ""

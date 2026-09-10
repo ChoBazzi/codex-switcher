@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,7 +58,7 @@ func Open(dir string) (*Store, error) {
 	}
 	return s, nil
 }
-func (s *Store) initialize() error {
+func (s *Store) initialize() (result error) {
 	for _, q := range []string{"PRAGMA foreign_keys=ON", "PRAGMA journal_mode=DELETE", "PRAGMA synchronous=FULL"} {
 		if _, err := s.db.query(q); err != nil {
 			return err
@@ -67,22 +68,53 @@ func (s *Store) initialize() error {
 	if err != nil || len(rows) != 1 {
 		return ErrStorage
 	}
-	if rows[0][0] != "0" && rows[0][0] != "1" && rows[0][0] != "2" {
+	if rows[0][0] != "0" && rows[0][0] != "1" && rows[0][0] != "2" && rows[0][0] != "3" {
 		return ErrStorage
 	}
+	// Rebuild bounded-slot CHECK constraints atomically without changing ownership.
+	if _, err := s.db.query("PRAGMA foreign_keys=OFF"); err != nil {
+		return err
+	}
+	defer func() {
+		if _, err := s.db.query("PRAGMA foreign_keys=ON"); err != nil && result == nil {
+			result = ErrStorage
+		}
+	}()
 	return s.transaction(func() error {
 		for _, q := range []string{
-			`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT NOT NULL, worktree TEXT NOT NULL, branch TEXT NOT NULL, slot TEXT NOT NULL CHECK(slot IN ('a','b')), last_seen INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','inflight','blocked')), request TEXT NOT NULL DEFAULT '')`,
+			`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT NOT NULL, worktree TEXT NOT NULL, branch TEXT NOT NULL, slot TEXT NOT NULL CHECK(slot IN ('a','b','c','d','e')), last_seen INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','inflight','blocked')), request TEXT NOT NULL DEFAULT '')`,
 			`CREATE TABLE IF NOT EXISTS responses (id TEXT PRIMARY KEY, session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE)`,
 			`CREATE INDEX IF NOT EXISTS sessions_last_seen ON sessions(last_seen)`,
-			`CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, source TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, target TEXT NOT NULL CHECK(target IN ('a','b')), checkpoint TEXT NOT NULL, digest TEXT NOT NULL, consumed_by TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL)`,
+			`CREATE TABLE IF NOT EXISTS handoffs (id TEXT PRIMARY KEY, source TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, target TEXT NOT NULL CHECK(target IN ('a','b','c','d','e')), checkpoint TEXT NOT NULL, digest TEXT NOT NULL, consumed_by TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS handoffs_pending_source ON handoffs(source) WHERE consumed_by=''`,
 			`UPDATE sessions SET state='blocked',request='' WHERE state='inflight'`,
-			`PRAGMA user_version=2`,
 		} {
 			if _, err := s.db.query(q); err != nil {
 				return err
 			}
+		}
+		if rows[0][0] == "1" || rows[0][0] == "2" {
+			for _, q := range []string{
+				`CREATE TABLE sessions_v3 (id TEXT PRIMARY KEY, project TEXT NOT NULL, worktree TEXT NOT NULL, branch TEXT NOT NULL, slot TEXT NOT NULL CHECK(slot IN ('a','b','c','d','e')), last_seen INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','inflight','blocked')), request TEXT NOT NULL DEFAULT '')`,
+				`INSERT INTO sessions_v3 SELECT * FROM sessions`,
+				`CREATE TABLE handoffs_v3 (id TEXT PRIMARY KEY, source TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, target TEXT NOT NULL CHECK(target IN ('a','b','c','d','e')), checkpoint TEXT NOT NULL, digest TEXT NOT NULL, consumed_by TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL)`,
+				`INSERT INTO handoffs_v3 SELECT * FROM handoffs`,
+				`DROP TABLE handoffs`, `DROP TABLE sessions`,
+				`ALTER TABLE sessions_v3 RENAME TO sessions`, `ALTER TABLE handoffs_v3 RENAME TO handoffs`,
+				`CREATE INDEX sessions_last_seen ON sessions(last_seen)`,
+				`CREATE UNIQUE INDEX handoffs_pending_source ON handoffs(source) WHERE consumed_by=''`,
+			} {
+				if _, err := s.db.query(q); err != nil {
+					return err
+				}
+			}
+		}
+		violations, err := s.db.query("PRAGMA foreign_key_check")
+		if err != nil || len(violations) != 0 {
+			return ErrStorage
+		}
+		if _, err := s.db.query("PRAGMA user_version=3"); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -125,7 +157,7 @@ func stamp(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 func (s *Store) Register(o checkpoint.Origin, slot string, now time.Time) (handoff.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !validOrigin(o) || (slot != "a" && slot != "b") {
+	if !validOrigin(o) || (!accountslot.Valid(slot)) {
 		return handoff.Session{}, ErrConflict
 	}
 	err := s.transaction(func() error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"os"
 	"os/signal"
@@ -19,10 +20,10 @@ func usageCommand(args []string, output io.Writer) error {
 	f := flag.NewFlagSet("usage", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	watch := f.Bool("watch", false, "poll every 60 seconds")
-	if f.Parse(args) != nil || f.NArg() > 1 || f.NArg() == 1 && f.Arg(0) != "a" && f.Arg(0) != "b" {
-		return errors.New("usage: switcher-helper usage [--watch] [a|b]")
+	if f.Parse(args) != nil || f.NArg() > 1 || f.NArg() == 1 && !accountslot.Valid(f.Arg(0)) {
+		return errors.New("usage: switcher-helper usage [--watch] [a|b|c|d|e]")
 	}
-	slots := []string{"a", "b"}
+	slots := accountslot.All()
 	if f.NArg() == 1 {
 		slots = []string{f.Arg(0)}
 	}

@@ -42,6 +42,42 @@ func (v *memoryVault) Write(b []byte) error {
 
 type runnerFunc func(context.Context, string, func()) error
 
+func TestLogoutPreservesOtherSlot(t *testing.T) {
+	v := &memoryVault{}
+	m := New(v, t.TempDir())
+	if err := m.Login(context.Background(), "a", writer("alpha"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Login(context.Background(), "b", writer("beta"), nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.Access("b", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Logout("a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Access("a", time.Now()); !errors.Is(err, ErrNotRegistered) {
+		t.Fatal("slot retained")
+	}
+	after, err := m.Access("b", time.Now())
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("other slot changed")
+	}
+	writes := v.writes
+	if err := m.Logout("a"); err != nil || v.writes != writes {
+		t.Fatal("absent logout not idempotent")
+	}
+	if err := m.Logout("invalid"); !errors.Is(err, ErrSlot) {
+		t.Fatal("invalid slot accepted")
+	}
+	v.fail = true
+	if err := m.Logout("b"); err == nil {
+		t.Fatal("store error ignored")
+	}
+}
+
 func (f runnerFunc) Run(c context.Context, d string, w func()) error { return f(c, d, w) }
 
 func syntheticAuth(id string, expires time.Time) []byte {
@@ -116,8 +152,8 @@ func TestSlotsDuplicateAndVaultErrors(t *testing.T) {
 	if !errors.Is(m.Login(ctx, "a", never, nil), ErrOccupied) {
 		t.Fatal("occupied slot replaced")
 	}
-	if !errors.Is(m.Login(ctx, "c", never, nil), ErrSlot) {
-		t.Fatal("third slot accepted")
+	if !errors.Is(m.Login(ctx, "f", never, nil), ErrSlot) {
+		t.Fatal("sixth slot accepted")
 	}
 	if !errors.Is(m.Login(ctx, "b", writer("synthetic-a"), nil), ErrDuplicate) || v.writes != 1 {
 		t.Fatal("duplicate account accepted")

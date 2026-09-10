@@ -4,6 +4,7 @@ package routing
 
 import (
 	"errors"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"math"
 	"sync"
 	"time"
@@ -16,9 +17,11 @@ import (
 )
 
 var (
-	ErrUnavailable = errors.New("routing_account_unavailable")
-	ErrIdentity    = errors.New("routing_session_unknown_or_mismatched")
-	ErrPolicy      = errors.New("routing_invalid_threshold")
+	ErrUsageUnavailable       = errors.New("routing_usage_unavailable")
+	ErrCredentialsUnavailable = errors.New("routing_credentials_unavailable")
+	ErrUnavailable            = errors.New("routing_account_unavailable")
+	ErrIdentity               = errors.New("routing_session_unknown_or_mismatched")
+	ErrPolicy                 = errors.New("routing_invalid_threshold")
 )
 
 // Router owns the Phase 0 handoff store. No credentials are cached here.
@@ -60,7 +63,7 @@ func (r *Router) Update(samples []usage.Snapshot) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, s := range samples {
-		if s.Slot != "a" && s.Slot != "b" {
+		if !accountslot.Valid(s.Slot) {
 			continue
 		}
 		if old, ok := r.samples[s.Slot]; ok && !s.LastAttempt.After(old.LastAttempt) {
@@ -136,13 +139,19 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 	}
 	chosen := ""
 	best := -1.0
-	for _, slot := range []string{"a", "b"} {
+	usageUnavailable, authUnavailable := false, false
+	for _, slot := range accountslot.All() {
 		left, ok := r.remaining(slot, now)
-		if !ok || left <= 100-r.threshold {
+		if !ok || left <= 0 {
+			s, exists := r.samples[slot]
+			if !exists || s.At(now).Stale || s.ErrorCode != "" || (s.State != "not_registered" && s.State != "limit_reached" && s.State != "ok") || (s.State == "ok" && (s.Usage == nil || s.LastAttempt.After(now))) {
+				usageUnavailable = true
+			}
 			continue
 		}
 		// Local credential validation only, not an upstream attempt or retry.
 		if _, err := r.access.Access(slot, now); err != nil {
+			authUnavailable = true
 			continue
 		}
 		if left > best {
@@ -150,6 +159,12 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 		}
 	}
 	if chosen == "" {
+		if authUnavailable {
+			return handoff.Session{}, errors.Join(ErrUnavailable, ErrCredentialsUnavailable)
+		}
+		if usageUnavailable {
+			return handoff.Session{}, errors.Join(ErrUnavailable, ErrUsageUnavailable)
+		}
 		return handoff.Session{}, ErrUnavailable
 	}
 	if r.disk != nil {
@@ -161,7 +176,7 @@ func (r *Router) Register(origin checkpoint.Origin, userInput bool, now time.Tim
 	return r.sessions.Register(origin, chosen)
 }
 
-// Resolve never registers or rebinds. Thresholds apply only to new sessions;
+// Resolve never registers or rebinds. Handoff target thresholds do not apply;
 // existing sessions remain pinned, but require fresh usable quota and auth.
 func (r *Router) Resolve(origin checkpoint.Origin, now time.Time) (proxy.Identity, error) {
 	r.mu.Lock()

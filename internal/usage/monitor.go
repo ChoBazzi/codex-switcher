@@ -20,6 +20,7 @@ type Fetcher interface {
 }
 type Snapshot struct {
 	Slot        string     `json:"slot"`
+	Registered  *bool      `json:"registered,omitempty"`
 	State       string     `json:"state"`
 	ErrorCode   string     `json:"error_code,omitempty"`
 	HTTPStatus  int        `json:"http_status,omitempty"`
@@ -27,6 +28,24 @@ type Snapshot struct {
 	LastSuccess *time.Time `json:"last_success"`
 	Stale       bool       `json:"stale"`
 	Usage       *Data      `json:"usage"`
+}
+
+// LocalSnapshot confirms occupancy without a remote usage request. Unknown
+// storage errors must never make a slot available for a new login.
+func LocalSnapshot(source AccessSource, slot string, now time.Time) Snapshot {
+	s := Snapshot{Slot: slot, State: "auth_error", Stale: true}
+	_, err := source.Access(slot, now)
+	registered := true
+	switch {
+	case err == nil:
+		s.State, s.Registered = "stored_unverified", &registered
+	case errors.Is(err, accounts.ErrExpired):
+		s.State, s.Registered = "auth_expired", &registered
+	case errors.Is(err, accounts.ErrNotRegistered):
+		registered = false
+		s.State, s.Registered = "not_registered", &registered
+	}
+	return s
 }
 
 // At lets consumers age a sample even when no new polling result arrives.
@@ -65,13 +84,19 @@ func (m *Monitor) Refresh(ctx context.Context, slots []string) []Snapshot {
 				s.State, s.ErrorCode = "auth_error", "usage_credentials_unavailable"
 				if errors.Is(err, accounts.ErrNotRegistered) {
 					s.State, s.ErrorCode, s.Usage, s.LastSuccess = "not_registered", "", nil, nil
+					registered := false
+					s.Registered = &registered
 				}
 				if errors.Is(err, accounts.ErrExpired) {
 					s.State, s.ErrorCode = "auth_expired", "usage_auth_expired"
+					registered := true
+					s.Registered = &registered
 				}
 				result[i] = s
 				return
 			}
+			registered := true
+			s.Registered = &registered
 			data, err := m.fetcher.Fetch(ctx, access)
 			if err != nil {
 				s.State, s.ErrorCode = "fetch_error", "usage_fetch_failed"

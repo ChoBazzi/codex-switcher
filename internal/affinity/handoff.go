@@ -3,6 +3,7 @@ package affinity
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"time"
 
 	"github.com/ChoBazzi/codex-switcher/internal/checkpoint"
@@ -33,7 +34,7 @@ func (s *Store) PrepareHandoff(source checkpoint.Origin, target, checkpointID, d
 	if !boundary {
 		return Reservation{}, handoff.ErrBoundary
 	}
-	if !validOrigin(source) || !valid(checkpointID) || !validDigest(digest) || (target != "a" && target != "b") {
+	if !validOrigin(source) || !valid(checkpointID) || !validDigest(digest) || (!accountslot.Valid(target)) {
 		return Reservation{}, ErrConflict
 	}
 	r := Reservation{ID: rand.Text(), Source: source, Target: target, CheckpointID: checkpointID, Digest: digest}
@@ -87,6 +88,53 @@ func (s *Store) Handoff(id string) (Reservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.reservation(id)
+}
+
+// InvalidateSlot prevents an old account's continuations from reaching a new
+// account registered in the same alias. Content files are not deleted.
+func (s *Store) InvalidateSlot(slot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !accountslot.Valid(slot) {
+		return ErrConflict
+	}
+	return s.transaction(func() error {
+		if _, err := s.db.query("UPDATE sessions SET state='blocked',request='' WHERE slot=?", slot); err != nil {
+			return err
+		}
+		_, err := s.db.query("DELETE FROM handoffs WHERE consumed_by='' AND (target=? OR source IN (SELECT id FROM sessions WHERE slot=?))", slot, slot)
+		return err
+	})
+}
+
+// FindHandoff resolves an exact source/checkpoint for read-only UI recovery.
+func (s *Store) FindHandoff(source checkpoint.Origin, checkpointID string) (Reservation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return Reservation{}, false, ErrStorage
+	}
+	if !validOrigin(source) || !valid(checkpointID) {
+		return Reservation{}, false, ErrConflict
+	}
+	rows, err := s.db.query("SELECT id FROM handoffs WHERE source=? AND checkpoint=?", source.Session, checkpointID)
+	if err != nil {
+		return Reservation{}, false, err
+	}
+	if len(rows) == 0 {
+		return Reservation{}, false, nil
+	}
+	if len(rows) != 1 {
+		return Reservation{}, false, ErrConflict
+	}
+	r, err := s.reservation(rows[0][0])
+	if err != nil {
+		return Reservation{}, false, err
+	}
+	if r.Source != source {
+		return Reservation{}, false, ErrConflict
+	}
+	return r, true, nil
 }
 
 func (s *Store) CheckpointReserved(source, checkpointID string) (bool, error) {

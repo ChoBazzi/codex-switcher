@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,8 +28,8 @@ func handoffCommand(args []string, out io.Writer) error {
 }
 
 func handoffCommandWithUsage(args []string, out io.Writer, access usage.AccessSource, fetcher usage.Fetcher) error {
-	if len(args) == 0 || (args[0] != "prepare" && args[0] != "cancel") {
-		return errors.New("usage: handoff prepare|cancel -C DIRECTORY --conversation HANDLE [--checkpoint ID --to a|b --confirm-boundary | --id HANDOFF_ID]")
+	if len(args) == 0 || (args[0] != "prepare" && args[0] != "cancel" && args[0] != "status") {
+		return errors.New("usage: handoff prepare|cancel -C DIRECTORY --conversation HANDLE [--checkpoint ID --to a|b|c|d|e --confirm-boundary | --id HANDOFF_ID]")
 	}
 	f := flag.NewFlagSet("handoff", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
@@ -42,10 +43,14 @@ func handoffCommandWithUsage(args []string, out io.Writer, access usage.AccessSo
 		return clirecord.ErrRecord
 	}
 	prepare := args[0] == "prepare"
-	if prepare && (*cp == "" || (*target != "a" && *target != "b") || !*boundary || *id != "") {
+	status := args[0] == "status"
+	if prepare && (*cp == "" || !accountslot.Valid(*target) || !*boundary || *id != "") {
 		return errors.New("handoff_prepare_requires_checkpoint_target_and_boundary")
 	}
-	if !prepare && (*id == "" || *cp != "" || *target != "" || *boundary) {
+	if status && (*cp == "" || *id != "" || *target != "" || *boundary) {
+		return errors.New("handoff_status_requires_checkpoint")
+	}
+	if !prepare && !status && (*id == "" || *cp != "" || *target != "" || *boundary) {
 		return errors.New("handoff_cancel_requires_id")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -78,6 +83,20 @@ func handoffCommandWithUsage(args []string, out io.Writer, access usage.AccessSo
 		return err
 	}
 	defer r.Close()
+	if status {
+		reservation, found, err := db.FindHandoff(r.Origin(), *cp)
+		if err != nil {
+			return err
+		}
+		state := "absent"
+		if found {
+			state = "pending"
+			if reservation.ConsumedBy != "" {
+				state = "consumed"
+			}
+		}
+		return json.NewEncoder(out).Encode(map[string]any{"event": "handoff_status", "state": state, "checkpoint_id": *cp, "handoff_id": reservation.ID, "target": reservation.Target, "model_requests": 0})
+	}
 	if !prepare {
 		if err := db.CancelHandoff(*id, r.Origin()); err != nil {
 			return err

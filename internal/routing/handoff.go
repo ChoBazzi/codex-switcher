@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"time"
 
 	"github.com/ChoBazzi/codex-switcher/internal/affinity"
@@ -10,7 +11,7 @@ import (
 
 // Target checks cached quota and local credentials, without a model request.
 func (r *Router) target(slot string, now time.Time) bool {
-	if slot != "a" && slot != "b" {
+	if !accountslot.Valid(slot) {
 		return false
 	}
 	left, ok := r.remaining(slot, now)
