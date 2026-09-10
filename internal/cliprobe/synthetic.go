@@ -17,6 +17,7 @@ type Upstream struct {
 	Calls             atomic.Int64
 	CompactCompletion bool
 	EmptyLogprobs     bool
+	MessagePhase      string
 }
 
 func ValidScenario(s string) bool {
@@ -55,6 +56,9 @@ func (u *Upstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		part["logprobs"] = []any{}
 	}
 	item := map[string]any{"id": "msg_synthetic", "type": "message", "role": "assistant", "status": "completed", "content": []any{part}}
+	if u.MessagePhase != "" {
+		item["phase"] = u.MessagePhase
+	}
 	emit("response.created", map[string]any{"response": map[string]any{"id": "resp_synthetic", "object": "response", "status": "in_progress", "output": []any{}}})
 	emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "msg_synthetic", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
 	emit("response.content_part.added", map[string]any{"item_id": "msg_synthetic", "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
