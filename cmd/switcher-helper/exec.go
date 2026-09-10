@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"log"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,11 +31,12 @@ import (
 	"github.com/ChoBazzi/codex-switcher/internal/projectidentity"
 	"github.com/ChoBazzi/codex-switcher/internal/proxy"
 	"github.com/ChoBazzi/codex-switcher/internal/routing"
+	"github.com/ChoBazzi/codex-switcher/internal/sessionstatus"
 	"github.com/ChoBazzi/codex-switcher/internal/usage"
 	"github.com/ChoBazzi/codex-switcher/internal/wikidraft"
 )
 
-func execCommand(args []string, output, diagnostics io.Writer) error {
+func execCommand(args []string, output, diagnostics io.Writer) (resultErr error) {
 	f := flag.NewFlagSet("exec", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	directory := f.String("C", ".", "project directory")
@@ -138,7 +141,7 @@ func execCommand(args []string, output, diagnostics io.Writer) error {
 	go func() {
 		defer close(pollDone)
 		first := true
-		monitor.Run(ctx, []string{"a", "b"}, func(samples []usage.Snapshot) error {
+		monitor.Run(ctx, accountslot.All(), func(samples []usage.Snapshot) error {
 			router.Update(samples)
 			if first {
 				close(ready)
@@ -206,17 +209,35 @@ func execCommand(args []string, output, diagnostics io.Writer) error {
 		defer draft.Close()
 		prompt, output = draft.Prompt(), draft
 	}
+	var status *sessionstatus.Publisher
+	registrationCode := ""
+	var statusMu sync.Mutex
+	defer func() {
+		state := "closed"
+		if resultErr != nil {
+			state = "failed"
+		}
+		status.Close(state)
+	}()
 	started := func(id string) error {
+		statusMu.Lock()
+		defer statusMu.Unlock()
 		if err := binding.Started(id); err != nil {
+			registrationCode = registrationFailureCode(err)
 			return err
 		}
 		if err := record.Started(id); err != nil {
+			registrationCode = "cli_record_registration_failed"
 			return err
 		}
 		session, ok := router.Session(id)
 		if !ok {
+			registrationCode = "cli_session_binding_unavailable"
 			return clisession.ErrBinding
 		}
+		status, _ = sessionstatus.Start(filepath.Join(parent, "com.bazzi.codex-switcher", "session-status"), sessionstatus.Session{
+			Conversation: record.Handle, Project: origin.Project, Worktree: origin.Worktree, Branch: origin.Branch, Slot: session.Account,
+		})
 		return json.NewEncoder(diagnostics).Encode(map[string]string{"event": "cli_session_started", "slot": session.Account, "conversation": record.Handle})
 	}
 	if err := record.Begin(); err != nil {
@@ -242,6 +263,18 @@ func execCommand(args []string, output, diagnostics io.Writer) error {
 			}()
 			return nil
 		}
+	}
+	beforeAttempt := h.BeforeAttempt
+	h.BeforeAttempt = func() error {
+		if beforeAttempt != nil {
+			if err := beforeAttempt(); err != nil {
+				return err
+			}
+		}
+		statusMu.Lock()
+		status.Set("active")
+		statusMu.Unlock()
+		return nil
 	}
 	go func() {
 		if server.Serve(listener) != http.ErrServerClosed {
@@ -272,7 +305,7 @@ func execCommand(args []string, output, diagnostics io.Writer) error {
 			runErr = record.Complete()
 		}
 	}
-	if err := writeExecDiagnostics(diagnostics, h.Diagnostics(), runErr); err != nil && runErr == nil {
+	if err := writeExecDiagnostics(diagnostics, h.Diagnostics(), runErr, registrationCode); err != nil && runErr == nil {
 		return errors.New("cli_diagnostics_output_failed")
 	}
 	if draft != nil && runErr == nil {
@@ -292,11 +325,25 @@ func execCommand(args []string, output, diagnostics io.Writer) error {
 	return runErr
 }
 
-func writeExecDiagnostics(out io.Writer, d proxy.Diagnostics, runErr error) error {
+func registrationFailureCode(err error) string {
+	for _, known := range []error{affinity.ErrStorage, routing.ErrUsageUnavailable, routing.ErrCredentialsUnavailable, routing.ErrUnavailable, routing.ErrIdentity} {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
+	}
+	return "cli_session_binding_unavailable"
+}
+
+func writeExecDiagnostics(out io.Writer, d proxy.Diagnostics, runErr error, registration ...string) error {
+	code := ""
+	if len(registration) > 0 {
+		code = registration[0]
+	}
 	return json.NewEncoder(out).Encode(struct {
 		Event string `json:"event"`
 		proxy.Diagnostics
-		Stage     string `json:"cli_stage"`
-		Succeeded bool   `json:"succeeded"`
-	}{"cli_run_finished", d, clirun.FailureStage(runErr), runErr == nil})
+		Stage            string `json:"cli_stage"`
+		Succeeded        bool   `json:"succeeded"`
+		RegistrationCode string `json:"session_registration_code,omitempty"`
+	}{"cli_run_finished", d, clirun.FailureStage(runErr), runErr == nil, code})
 }

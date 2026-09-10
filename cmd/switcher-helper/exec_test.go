@@ -5,10 +5,29 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/ChoBazzi/codex-switcher/internal/proxy"
+	"github.com/ChoBazzi/codex-switcher/internal/routing"
 	"io"
 	"strings"
 	"testing"
 )
+
+func TestRegistrationDiagnosticRedactsUnderlyingError(t *testing.T) {
+	err := errors.Join(routing.ErrUsageUnavailable, errors.New("synthetic-secret"))
+	code := registrationFailureCode(err)
+	if code != "routing_usage_unavailable" {
+		t.Fatal(code)
+	}
+	var out bytes.Buffer
+	if writeExecDiagnostics(&out, proxy.Diagnostics{}, err, code) != nil {
+		t.Fatal("write")
+	}
+	if strings.Contains(out.String(), "synthetic-secret") || !strings.Contains(out.String(), `"session_registration_code":"routing_usage_unavailable"`) {
+		t.Fatal(out.String())
+	}
+	if registrationFailureCode(errors.New("synthetic-secret")) != "cli_session_binding_unavailable" {
+		t.Fatal("unknown error leaked")
+	}
+}
 
 func TestExecRejectsInvalidArguments(t *testing.T) {
 	for _, args := range [][]string{nil, {" "}, {"a", "b"}, {"--unknown"}, {"--model", "bad\nmodel", "synthetic"}, {"--checkpoint"}, {"--checkpoint", "--resume", "00000000000000000000000000000000", "extra prompt"}} {

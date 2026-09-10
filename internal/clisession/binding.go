@@ -80,15 +80,15 @@ func (b *Binding) Started(id string) error {
 	b.origin.Session = id
 	if b.handoffID != "" {
 		if _, err := b.router.BindHandoff(b.handoffID, b.origin, b.snapshot, true, time.Now()); err != nil {
-			return ErrBinding
+			return errors.Join(ErrBinding, err)
 		}
 	} else if b.resume == "" {
 		if _, err := b.router.Register(b.origin, true, time.Now()); err != nil {
-			return ErrBinding
+			return errors.Join(ErrBinding, err)
 		}
 	} else {
 		if _, err := b.router.Resolve(b.origin, time.Now()); err != nil {
-			return ErrBinding
+			return errors.Join(ErrBinding, err)
 		}
 	}
 	b.failed = false
