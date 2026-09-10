@@ -25,6 +25,10 @@ CLI가 프록시를 바라보게 만드는 방법에는 전역 설정 파일(`co
 
 ## 최종 결정
 
+ADR 0037에서 기존 Codex TUI를 직접 사용하는 원칙을 재확정했다. 별도 chat 런처는 채택하지 않는다. 아래 프로필 방식은 목표 설계이며, 현재 exec 전용 바인딩 때문에 직접 TUI 연결 구현은 아직 완료되지 않았다.
+
+ADR 0038에서 Responses custom provider와 공식 lifecycle hooks를 사용하는 직접 연결을 추가했다. 아래 초기 chatgpt_base_url 예시 대신 구현된 switcher.config.toml을 사용한다. 실제 TUI 승인 후 검증과 앱 인계 연동은 별도 단계다.
+
 **2번: 전용 프로필(`$CODEX_HOME/switcher.config.toml` 및 `codex -p switcher`) 방식**을 채택한다.
 
 - 메뉴바 앱/Go 헬퍼가 `$CODEX_HOME/switcher.config.toml`에 다음 설정을 작성/관리한다.
