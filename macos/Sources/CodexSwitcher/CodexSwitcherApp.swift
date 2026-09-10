@@ -396,6 +396,8 @@ struct MenuPanel: View {
                 Spacer()
                 Text(selected ? "현재 선택 · \(account.stateLabel)" : account.stateLabel).font(.caption2)
             }
+            Text("\(account.planLabel)\(stale && account.usage?.planType != nil ? " · 이전 조회 정보" : "")")
+                .font(.caption2).foregroundStyle(.secondary)
             quota(account.usage?.primary, stale: stale)
             quota(account.usage?.secondary, stale: stale)
             if !store.demo {

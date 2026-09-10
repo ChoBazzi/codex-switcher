@@ -11,6 +11,16 @@ enum ModelCheck {
         unknownAccount.registered = false
         precondition(!unknownAccount.canLogoutAccount)
         print("PASS registered account logout independent of unknown quota")
+        for (plan, label) in [("free", "Free · 무료"), ("plus", "Plus"), ("business", "Business"), ("unrecognized", "요금제 미확인")] {
+            let data = Data("""
+            {"event":"usage_snapshot","accounts":[{"slot":"a","registered":true,"state":"unknown","stale":false,"usage":{"plan_type":"\(plan)","primary":{},"secondary":{}}}]}
+            """.utf8)
+            let account = try UsageSnapshot.decode(data).accounts[0]
+            precondition(account.planLabel == label && account.canLogoutAccount)
+            precondition(account.usage?.remainingPercent == nil)
+        }
+        precondition(AccountSnapshot.empty("a").planLabel == "요금제 미확인")
+        print("PASS optional plan display without inventing quota or disabling logout")
         var logout = LogoutConfirmation()
         logout.begin(slot: "invalid")
         precondition(logout.slot == nil)

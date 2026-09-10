@@ -16,6 +16,7 @@ public struct UsageWindow: Decodable, Equatable {
 }
 
 public struct UsageData: Decodable, Equatable {
+    public var planType: String? = nil
     public let primary: UsageWindow
     public let secondary: UsageWindow
     public let remainingPercent: Double?
@@ -33,6 +34,20 @@ public struct AccountSnapshot: Decodable, Equatable, Identifiable {
     // Unknown quota does not mean the locally stored credentials are absent.
     public var canLogoutAccount: Bool {
         registered != false && (registered == true || !["unknown", "not_registered"].contains(state))
+    }
+
+    public var planLabel: String {
+        switch usage?.planType {
+        case "free": return "Free · 무료"
+        case "go": return "Go"
+        case "plus": return "Plus"
+        case "pro": return "Pro"
+        case "team": return "Team"
+        case "business": return "Business"
+        case "enterprise": return "Enterprise"
+        case "edu": return "Edu"
+        default: return "요금제 미확인"
+        }
     }
 
     public func isStale(at now: Date) -> Bool {

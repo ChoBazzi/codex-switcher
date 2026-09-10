@@ -16,6 +16,7 @@ type Window struct {
 }
 
 type Data struct {
+	PlanType         string   `json:"plan_type,omitempty"`
 	Primary          Window   `json:"primary"`
 	Secondary        Window   `json:"secondary"`
 	Allowed          *bool    `json:"allowed"`
@@ -34,6 +35,7 @@ type rawWindow struct {
 func Parse(data []byte) (Data, error) {
 	var body struct {
 		Rate json.RawMessage `json:"rate_limit"`
+		Plan json.RawMessage `json:"plan_type"`
 	}
 	if len(data) > MaxBytes || json.Unmarshal(data, &body) != nil || len(body.Rate) == 0 {
 		return Data{}, failure("usage_schema_unsupported", 0)
@@ -56,6 +58,14 @@ func Parse(data []byte) (Data, error) {
 		return Data{}, err
 	}
 	d := Data{Primary: primary, Secondary: secondary, Allowed: rate.Allowed, LimitReached: rate.Reached, CheckpointLevel: "unknown"}
+	// Optional display-only metadata: never forward arbitrary upstream strings.
+	var plan string
+	if json.Unmarshal(body.Plan, &plan) == nil {
+		switch plan {
+		case "free", "go", "plus", "pro", "team", "business", "enterprise", "edu":
+			d.PlanType = plan
+		}
+	}
 	if primary.RemainingPercent != nil && secondary.RemainingPercent != nil {
 		remaining := math.Min(*primary.RemainingPercent, *secondary.RemainingPercent)
 		d.RemainingPercent = &remaining
