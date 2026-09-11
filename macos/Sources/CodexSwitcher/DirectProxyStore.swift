@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwitcherUIModel
 
-/// Controls only its own helper through inherited pipes. Never launches Codex.
+/// Owns a disposable relay. The independent service retains the CLI and proxy.
 @MainActor
 final class DirectProxyStore: ObservableObject {
     @Published var slot = "a"
@@ -46,7 +46,7 @@ final class DirectProxyStore: ObservableObject {
         let run = UUID(); generation = run
         let process = Process(), source = Pipe(), sink = Pipe()
         process.executableURL = helper
-        process.arguments = ["switch-probe", "--allow-live", "--managed", "--auto", "--tools"]
+        process.arguments = ["proxy-connect"]
         process.standardInput = source; process.standardOutput = sink
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { message = "프록시 실행 실패 · helper 확인 필요"; return }
@@ -71,7 +71,7 @@ final class DirectProxyStore: ObservableObject {
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 15_000_000_000)
             guard let self, self.generation == run, self.starting else { return }
-            self.stop(); self.message = "프록시 시작 시간 초과 · 계정 로그인 확인 후 재시작"
+            self.stop(); self.message = "프록시 연결 시간 초과 · helper 확인 후 다시 연결"
         }
     }
 
@@ -217,7 +217,7 @@ final class DirectProxyStore: ObservableObject {
 
     private func ended(run: UUID) {
         guard generation == run else { return }
-        stop(); message = "프록시 종료 · A/B 로그인과 helper 확인 후 재시작"
+        stop(); message = "프록시 제어 연결 종료 · 다시 연결해 상태 확인"
     }
 
     func stop() {

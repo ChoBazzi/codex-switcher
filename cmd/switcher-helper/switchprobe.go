@@ -142,7 +142,12 @@ func probeAdmissionCode(identityErr error, busy, failed bool, session, id string
 }
 
 func switchProbe(args []string, input io.Reader, output io.Writer) error {
-	return switchProbeWithAccess(args, input, output, accounts.New(credentialstore.New(), ""), livetest.Upstream)
+	parent, err := os.UserConfigDir()
+	if err != nil {
+		return errors.New("private_state_directory_unavailable")
+	}
+	access := accounts.NewRefreshing(credentialstore.New(), filepath.Join(parent, "com.bazzi.codex-switcher"), accounts.NewOAuthRefresher())
+	return switchProbeWithAccess(args, input, output, access, livetest.Upstream)
 }
 
 type probeAccess interface {
@@ -206,6 +211,14 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 	var usageRequestID uint64
 	var usageFinished time.Time
 	usageWake := make(chan struct{}, 1)
+	var turnLease io.Closer
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if turnLease != nil {
+			turnLease.Close()
+		}
+	}()
 	var revision uint64
 	var outMu sync.Mutex
 	report := func(v any) { outMu.Lock(); defer outMu.Unlock(); _ = json.NewEncoder(output).Encode(v) }
@@ -285,13 +298,17 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 	}
 	// Caller holds mu. A single ordered pipe carries observations and acknowledgments.
 	state := func(event string, accepted bool) {
+		if !busy && !turnPending && turnLease != nil {
+			turnLease.Close()
+			turnLease = nil
+		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending, "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
 			"can_abandon_turn": probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)})
 	}
 	resolve := func(r *http.Request) (proxy.Identity, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		c, err := access.Access(slot, time.Now())
+		c, err := usage.RequestAccess(access, slot, time.Now())
 		activeCredential = sha256.Sum256([]byte(c.Token))
 		for _, item := range activeCompactItems {
 			if !compactOwners.permits(item, slot, activeCredential) {
@@ -426,6 +443,17 @@ X-Switcher-Run = %q
 				return
 			}
 			slot, chosen = next, true
+		}
+		if turnLease == nil {
+			if owner, ok := access.(interface{ BeginTurn() (io.Closer, error) }); ok {
+				lease, leaseErr := owner.BeginTurn()
+				if leaseErr != nil {
+					mu.Unlock()
+					http.Error(w, "account_operation_busy", 409)
+					return
+				}
+				turnLease = lease
+			}
 		}
 		busy, session = true, id
 		activeCompactItems = nil
@@ -608,7 +636,35 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "status" {
+					// A UI may disappear before its account_changed notification. Once the
+					// credential operation lock is free, reconcile pending slots locally.
+					if owner, ok := access.(interface{ AccountsIdle() bool }); ok && owner.AccountsIdle() {
+						changed := false
+						for i, pending := range accountChanging {
+							if pending {
+								accountChanging[i] = false
+								usageEpoch[i]++
+								changed = true
+								samples[i] = usage.LocalSnapshot(access, accountslot.All()[i], time.Now())
+							}
+						}
+						if changed {
+							publishUsage()
+						}
+					}
 					state("probe_state", false)
+					mu.Unlock()
+					continue
+				}
+				if command.Action == "shutdown" {
+					ok := !busy && !waiting && !turnPending
+					state("probe_shutdown", ok)
+					if ok {
+						failed = true
+						cancel()
+						mu.Unlock()
+						return
+					}
 					mu.Unlock()
 					continue
 				}

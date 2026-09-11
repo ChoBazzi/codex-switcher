@@ -323,7 +323,7 @@ struct MenuPanel: View {
                 }
                 Button("Codex CLI 연결 명령 복사") { direct.copyCommand() }.disabled(!direct.ready)
                 if !direct.ready || direct.failed {
-                    Button(direct.starting ? "프록시 시작 중…" : "모델 프록시 재시작") {
+                    Button(direct.starting ? "프록시 시작 중…" : "모델 프록시 다시 연결") {
                         if let helper = store.helper { direct.start(helper: helper) }
                     }.disabled(direct.starting || direct.busy || store.helper == nil || login.busy)
                 }
@@ -346,7 +346,7 @@ struct MenuPanel: View {
                 Button { store.refresh() } label: { Label("새로고침", systemImage: "arrow.clockwise") }
                     .help("프록시가 실제 사용량을 조회합니다. 중복 조회를 막고 완료 후 60초 뒤 자동 조회합니다. 연속 조회는 5초 간격으로 제한합니다.")
                     .disabled(store.demo || !direct.canReadUsage || login.busy || store.helper == nil)
-                Button("종료") { NSApplication.shared.terminate(nil) }.disabled(login.busy || direct.busy)
+                Button("종료") { NSApplication.shared.terminate(nil) }.disabled(login.busy)
             }
         }
         .padding(18)

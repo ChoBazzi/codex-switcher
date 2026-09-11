@@ -31,6 +31,13 @@ func accountCommand(args []string, output io.Writer) error {
 		return applock.ErrStorage
 	}
 	stateDir := filepath.Join(parent, "com.bazzi.codex-switcher")
+	if args[0] != "status" {
+		activity, err := accounts.AcquireActivity(stateDir)
+		if err != nil {
+			return err
+		}
+		defer activity.Close()
+	}
 	lock, err := applock.Acquire(stateDir)
 	if err != nil {
 		return err

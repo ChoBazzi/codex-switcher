@@ -79,7 +79,7 @@ func (m *Monitor) Refresh(ctx context.Context, slots []string) []Snapshot {
 			now := time.Now().UTC()
 			s.Slot, s.LastAttempt, s.ErrorCode, s.HTTPStatus = slot, now, "", 0
 			s.Stale = true
-			access, err := m.source.Access(slot, now)
+			access, err := RequestAccess(m.source, slot, now)
 			if err != nil {
 				s.State, s.ErrorCode = "auth_error", "usage_credentials_unavailable"
 				if errors.Is(err, accounts.ErrNotRegistered) {
@@ -160,4 +160,14 @@ func (m *Monitor) run(ctx context.Context, slots []string, ticks <-chan time.Tim
 			}
 		}
 	}
+}
+
+// RequestAccess opts into helper-owned renewal without changing local inspection.
+func RequestAccess(source AccessSource, slot string, now time.Time) (accounts.Access, error) {
+	if renewable, ok := source.(interface {
+		RequestAccess(string, time.Time) (accounts.Access, error)
+	}); ok {
+		return renewable.RequestAccess(slot, now)
+	}
+	return source.Access(slot, now)
 }

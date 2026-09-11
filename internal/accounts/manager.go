@@ -44,8 +44,9 @@ type Runner interface {
 	Run(context.Context, string, func()) error
 }
 type record struct {
-	Slot        string      `json:"slot"`
-	Credentials Credentials `json:"credentials"`
+	Slot           string      `json:"slot"`
+	Credentials    Credentials `json:"credentials"`
+	RefreshBlocked bool        `json:"refresh_blocked,omitempty"`
 }
 type registry struct {
 	Version  int      `json:"version"`
@@ -63,6 +64,7 @@ type Manager struct {
 	mu         sync.Mutex
 	vault      credentialstore.Vault
 	tempParent string
+	refresher  Refresher
 }
 
 func New(v credentialstore.Vault, tempParent string) *Manager {
@@ -119,7 +121,7 @@ func (m *Manager) Status() ([]Status, error) {
 		for _, a := range r.Accounts {
 			if a.Slot == statuses[i].Slot {
 				state := "stored_unverified"
-				if !a.Credentials.ExpiresAt.After(time.Now()) {
+				if a.RefreshBlocked || !a.Credentials.ExpiresAt.After(time.Now()) {
 					state = "expired"
 				}
 				expires := a.Credentials.ExpiresAt
@@ -174,7 +176,7 @@ func (m *Manager) Access(slot string, now time.Time) (Access, error) {
 	}
 	for _, a := range r.Accounts {
 		if a.Slot == slot {
-			if !a.Credentials.ExpiresAt.After(now.Add(30 * time.Second)) {
+			if a.RefreshBlocked || !a.Credentials.ExpiresAt.After(now.Add(30*time.Second)) {
 				return Access{}, ErrExpired
 			}
 			return Access{Token: a.Credentials.AccessToken, AccountID: a.Credentials.AccountID, ExpiresAt: a.Credentials.ExpiresAt}, nil
@@ -303,6 +305,7 @@ func (m *Manager) login(ctx context.Context, slot string, runner Runner, report 
 	}
 	if replace {
 		r.Accounts[index].Credentials = c
+		r.Accounts[index].RefreshBlocked = false
 	} else {
 		r.Accounts = append(r.Accounts, record{Slot: slot, Credentials: c})
 	}

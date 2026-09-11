@@ -8,6 +8,8 @@
 
 기존 Codex 로그인 정보를 읽거나 변경하지 않고 계정을 추가해야 한다. OAuth URL, client ID 및 콜백 프로토콜은 재구현하지 않고 공식 `codex login`에 위임한다.
 
+후속 [ADR 0053](0053-helper-token-refresh.md)에서 앱 프록시의 토큰 갱신을 추가했다. 아래 자동 갱신 미구현 설명은 계정 등록 단계의 기록이다.
+
 ## 구현 결정
 
 - `switcher-helper account login a|b`, `account status`, `account reauth a|b`를 제공한다. SwiftUI 및 HTTP 로그인 제어 API를 만들기 전에 동일 인증 코어를 터미널에서 검증한다.

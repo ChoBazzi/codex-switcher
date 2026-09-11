@@ -15,6 +15,8 @@ Codex CLI의 실행 중단 없이 계정을 전환하려면 로컬 역방향 프
 2. **단일 Go 앱 + Web/Systray UI**: 모든 로직을 Go로 작성하고 간이 시스템 트레이 또는 웹 뷰 사용.
 3. **SwiftUI 메뉴바 앱 + Go 프록시 헬퍼 독립 데몬 (선택)**: UI는 Swift/SwiftUI로, 프록시 및 동시성 처리는 독립 Go 프로세스로 분리하고 loopback Control API로 통신.
 
+후속 [ADR 0054](0054-independent-proxy-service.md)에서 앱과 모델 프록시 수명을 분리했다. 앱 서비스 제어는 사용자 전용 Unix 소켓, 시작은 최초 연결 시 detached 프로세스로 구체화하며 로그인 시 자동 시작은 보류한다. 토큰 갱신은 [ADR 0053](0053-helper-token-refresh.md)을 따른다.
+
 ## 최종 결정
 
 **3번: SwiftUI 메뉴바 앱 + Go 프록시 헬퍼 듀얼 프로세스 구조**를 채택한다.

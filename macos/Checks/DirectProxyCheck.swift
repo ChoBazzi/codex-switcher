@@ -3,7 +3,7 @@ import Foundation
 @main
 struct DirectProxyCheck {
     @MainActor static func main() async throws {
-        if CommandLine.arguments.contains("switch-probe") {
+        if CommandLine.arguments.contains("proxy-connect") {
             func emit(_ value: [String: Any]) {
                 let data = try! JSONSerialization.data(withJSONObject: value)
                 try! FileHandle.standardOutput.write(contentsOf: data + Data([10]))

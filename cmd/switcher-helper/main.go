@@ -24,6 +24,28 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "proxy-stop" {
+		if err := proxyStop(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(os.Args) == 2 && (os.Args[1] == "proxy-connect" || os.Args[1] == "proxy-daemon") {
+		var err error
+		if os.Args[1] == "proxy-connect" {
+			err = proxyConnect(os.Stdin, os.Stdout)
+		} else {
+			err = proxyDaemon()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "proxy_service_unavailable")
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "switch-probe" {
 		if err := switchProbe(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
