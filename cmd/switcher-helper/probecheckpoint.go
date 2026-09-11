@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 
 	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
@@ -127,4 +128,28 @@ func writeProbeProfile(path string, data []byte) error {
 		return errCheckpoint
 	}
 	return nil
+}
+
+// Registry iteration order is irrelevant; compare all persisted fields without
+// retaining another copy of credentials or treating a status poll as a change.
+func sameProbeCheckpoint(a, b *probeCheckpoint) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	left, right := *a, *b
+	left.Owners, right.Owners = nil, nil
+	if !reflect.DeepEqual(left, right) || len(a.Owners) != len(b.Owners) {
+		return false
+	}
+	owners := make(map[probeCheckpointOwner]int, len(a.Owners))
+	for _, owner := range a.Owners {
+		owners[owner]++
+	}
+	for _, owner := range b.Owners {
+		if owners[owner] == 0 {
+			return false
+		}
+		owners[owner]--
+	}
+	return true
 }

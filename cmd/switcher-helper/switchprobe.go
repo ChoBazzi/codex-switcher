@@ -249,6 +249,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	}
 	var checkpointAddress, checkpointHome string
 	checkpointRetired := false
+	var lastCheckpoint *probeCheckpoint
 	persist := func() bool {
 		if checkpointDir == "" {
 			return true
@@ -263,12 +264,16 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		for key, owner := range compactOwners {
 			c.Owners = append(c.Owners, probeCheckpointOwner{key, owner.credential, owner.slot})
 		}
+		if sameProbeCheckpoint(lastCheckpoint, c) {
+			return true
+		}
 		checkpointErr = writeProbeCheckpoint(checkpointDir, c)
 		if checkpointErr != nil {
 			failed = true
 			cancel()
 			return false
 		}
+		lastCheckpoint = c
 		return true
 	}
 	var outMu sync.Mutex

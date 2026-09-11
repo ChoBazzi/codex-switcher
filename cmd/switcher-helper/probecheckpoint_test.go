@@ -462,3 +462,66 @@ func TestProbeCheckpointNativeCompaction(t *testing.T) {
 		t.Fatal("old CLI home removed")
 	}
 }
+
+func TestProbeCheckpointStatusDoesNotWrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "runtime")
+	p := startCheckpointProcess(t, dir, "http://127.0.0.1:9")
+	defer p.stop()
+	p.next(t, "probe_ready")
+	state := p.next(t, "probe_state")
+	path := filepath.Join(dir, "checkpoint.json")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Atomic checkpoint writes replace the inode. Keep it open to prevent reuse.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for i := 0; i < 10; i++ {
+		io.WriteString(p.input, "{\"action\":\"status\"}\n")
+		if p.next(t, "probe_state")["revision"] != state["revision"] {
+			t.Fatal("status mutated revision")
+		}
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("status rewrote checkpoint")
+	}
+	command, _ := json.Marshal(map[string]any{"action": "select", "slot": "b", "revision": state["revision"]})
+	p.input.Write(append(command, '\n'))
+	if p.next(t, "probe_selection")["accepted"] != true {
+		t.Fatal("selection failed")
+	}
+	after, err = os.Stat(path)
+	if err != nil || os.SameFile(before, after) {
+		t.Fatal("state change was not saved")
+	}
+	saved, err := readProbeCheckpoint(dir)
+	if err != nil || saved.Slot != "b" {
+		t.Fatal("selection not durable before acknowledgment")
+	}
+}
+
+func TestProbeCheckpointComparison(t *testing.T) {
+	a := &probeCheckpoint{Slot: "a", Owners: []probeCheckpointOwner{{Key: [32]byte{1}, Slot: "a"}, {Key: [32]byte{2}, Slot: "b"}}}
+	b := *a
+	b.Owners = []probeCheckpointOwner{a.Owners[1], a.Owners[0]}
+	if !sameProbeCheckpoint(a, &b) {
+		t.Fatal("registry order counted as change")
+	}
+	b.Busy = true
+	if sameProbeCheckpoint(a, &b) {
+		t.Fatal("inflight change ignored")
+	}
+	b.Busy = false
+	b.Owners[0].Credential = [32]byte{3}
+	if sameProbeCheckpoint(a, &b) {
+		t.Fatal("ownership change ignored")
+	}
+	if sameProbeCheckpoint(nil, a) {
+		t.Fatal("initial save skipped")
+	}
+}

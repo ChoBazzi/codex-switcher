@@ -19,6 +19,7 @@
 - 같은 loopback 포트, CLI 홈과 로컬 연결 secret을 재사용한다. CLI 홈은 runtime 아래 0700 디렉터리에 두고 대화 기록과 config를 삭제하지 않는다. 복구 시 사용자가 수정한 config를 덮어쓰지 않는다.
 - 대화 식별자, 선택 슬롯, 이전 슬롯, 요청/도구 대기/실패 상태, 명시적 복구의 새 입력 조건, 요청·마지막 사용자 경계의 해시와 revision을 저장한다. 사용량은 복원하지 않고 새로 조회한다.
 - 파일은 0600이며 임시 파일 쓰기·fsync·rename·디렉터리 fsync로 교체한다. 읽을 때 소유자·권한·일반 파일·단일 링크·버전·범위를 검사하고 symlink를 거절한다. 손상/권한 오류나 기존 포트 점유 시 새 상태로 우회하지 않고 시작을 거절한다.
+- 마지막 저장 성공 상태와 복구 정보 전체가 같으면 파일 쓰기와 fsync를 생략한다. 압축 소유권 목록의 순서는 변화로 취급하지 않는다. 초기 저장과 상태 변화는 기존처럼 즉시 동기 저장하고, 저장 실패는 캐시에 반영하지 않는다. 매초 상태 응답과 사용량 조회 주기는 유지한다.
 - upstream 전송 전에 요청 경계와 inflight를 저장한다. 저장 실패 시 전송을 차단하고 서비스를 종료한다. 정상 종료 상태도 저장한다. 완료 전달 직전/직후 crash처럼 전달 여부가 불확실한 경우 성공으로 추정하지 않는다.
 - 재시작 자체는 모델 요청을 시작하지 않는다. 정상 완료 상태에서도 기존 사용자 경계의 재전송은 차단하고 CLI의 새 사용자 입력을 기다린다.
 - 요청/도구 처리 중 종료됐다면 실패 상태로 복구한다. 앱에서 같은 계정의 `복구 준비 · 새 입력 대기` 또는 다른 사용 가능한 계정을 선택한 뒤 CLI에 새 지시를 입력한다. 선택만으로 요청이나 도구를 재실행하지 않는다. 기존의 불완전 도구 이력 검증은 유지하므로 미완료 호출 쌍이 남으면 새 대화가 필요할 수 있다.
@@ -41,5 +42,6 @@
 - `TestProbeCheckpointWriteFailureBlocksDispatch`: checkpoint 저장 실패 시 upstream 호출 0회와 손상 상태 우회 거절.
 - `TestProbeCheckpointOwnerRoundTrip`, `TestProbeCheckpointRejectsUnsafeStorage`: 소유권 해시·retirement·권한 및 손상/symlink 거절.
 - `DirectProxyCheck`: 복구 가능한 실패 상태에서만 현재 계정 선택을 허용하고 busy일 때 차단.
+- `TestProbeCheckpointStatusDoesNotWrite`, `TestProbeCheckpointComparison`: 반복 상태 조회 시 파일 inode/수정 시각 보존, 계정 변경 ACK 전 저장, 소유권 순서 무시 및 작업/인증 변화 감지.
 
 `sh macos/Checks/verify.sh`로 전체 Go race/vet, helper 빌드, 설치 CLI 합성 검사, Swift 앱 빌드와 UI 검사를 통과했다. 실제 계정 모델 호출이나 사용자 daemon 종료는 검증에 사용하지 않는다. 실제 메뉴바 앱에서의 강제 종료/복구와 macOS 재부팅 수동 검증은 별도다.
