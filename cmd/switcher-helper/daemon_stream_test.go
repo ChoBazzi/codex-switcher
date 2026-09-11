@@ -88,6 +88,7 @@ func TestServiceStreamSurvivesReconnect(t *testing.T) {
 	request, _ := http.NewRequest("POST", extract("base_url")+"/responses", strings.NewReader(`{"input":[{"type":"message","role":"user","content":"synthetic"}]}`))
 	request.Header.Set("X-Switcher-Run", extract("X-Switcher-Run"))
 	request.Header.Set("Thread-Id", "12345678-1234-4234-8234-123456789012")
+	request.Header.Set("Session-Id", "12345678-1234-4234-8234-123456789012")
 	responseDone := make(chan error, 1)
 	go func() {
 		response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)

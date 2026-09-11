@@ -13,7 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ChoBazzi/codex-switcher/internal/accounts"
 	"github.com/ChoBazzi/codex-switcher/internal/applock"
+	"github.com/ChoBazzi/codex-switcher/internal/credentialstore"
+	"github.com/ChoBazzi/codex-switcher/internal/livetest"
+	"github.com/ChoBazzi/codex-switcher/internal/usage"
 )
 
 var errDaemon = errors.New("proxy_service_unavailable")
@@ -278,12 +282,15 @@ func proxyDaemon() error {
 		return err
 	}
 	return serveProxy(dir, func(input io.Reader, output io.Writer) error {
-		return switchProbe([]string{"--allow-live", "--managed", "--auto", "--tools"}, input, output)
+		access := accounts.NewRefreshing(credentialstore.New(), filepath.Dir(dir), accounts.NewOAuthRefresher())
+		return switchProbeWithCheckpoint([]string{"--allow-live", "--managed", "--auto", "--tools"}, input, output, access, livetest.Upstream, nil, usage.Interval, 5*time.Second, dir)
 	})
 }
 
 // Explicit maintenance only: never starts a service or retries a stop request.
-func proxyStop() error {
+func proxyStop() error { return proxyStopSession(false) }
+
+func proxyStopSession(newSession bool) error {
 	dir, err := serviceDir()
 	if err != nil {
 		return err
@@ -294,7 +301,7 @@ func proxyStop() error {
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err = io.WriteString(conn, "{\"action\":\"shutdown\"}\n"); err != nil {
+	if err = json.NewEncoder(conn).Encode(map[string]any{"action": "shutdown", "new_session": newSession}); err != nil {
 		return errDaemon
 	}
 	scanner := bufio.NewScanner(conn)

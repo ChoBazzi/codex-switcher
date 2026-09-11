@@ -8,6 +8,7 @@ final class DirectProxyStore: ObservableObject {
     @Published var slot = "a"
     @Published var busy = false
     @Published var failed = false
+    @Published var canRecoverCurrent = false
     @Published var connected = false
     @Published var ready = false
     @Published var starting = false
@@ -37,7 +38,7 @@ final class DirectProxyStore: ObservableObject {
     private var uncertain = false
 
     func canSelect(_ target: String) -> Bool {
-        ready && !busy && !pending && target != slot && AccountSlots.all.contains(target)
+        ready && !busy && !pending && (target != slot || (failed && canRecoverCurrent)) && AccountSlots.all.contains(target)
     }
 
     func start(helper: URL) {
@@ -82,6 +83,7 @@ final class DirectProxyStore: ObservableObject {
             var slot: String?; var busy: Bool?; var failed: Bool?; var connected: Bool?
             var revision: UInt64?; var accepted: Bool?; var codex_home: String?
             var can_abandon_turn: Bool?
+            var can_recover_current: Bool?
             var request_id: UInt64?; var status: String?; var succeeded: Bool?
         }
         guard let e = try? JSONDecoder().decode(Event.self, from: data) else { return }
@@ -113,6 +115,7 @@ final class DirectProxyStore: ObservableObject {
               AccountSlots.all.contains(nextSlot), let nextBusy = e.busy, let nextFailed = e.failed,
               let nextConnected = e.connected, let nextRevision = e.revision else { return }
         slot = nextSlot; busy = nextBusy; failed = nextFailed; connected = nextConnected
+        canRecoverCurrent = e.can_recover_current == true && nextFailed && !nextBusy
         toolWaiting = e.can_abandon_turn == true && nextBusy && !nextFailed
         revision = nextRevision; lastRead = Date(); waitingStatus = false
         ready = home != nil && !uncertain; starting = false
@@ -125,7 +128,7 @@ final class DirectProxyStore: ObservableObject {
                 message = e.accepted == true ? "다음 요청은 \(slot.uppercased()) · CLI 입력 대기" : "전환 거절 · 상태가 바뀌었거나 계정 사용 불가"
             }
         } else if uncertain { message = "전환 결과 미확인 · 명령을 다시 보내지 않습니다" }
-        else if failed { message = "요청 실패 · 다른 계정 수동 선택 후 새 입력 가능" }
+        else if failed { message = canRecoverCurrent ? "요청 중단 · 계정의 복구 준비를 누른 뒤 CLI에 새 지시를 입력하세요" : "요청 실패 · 다른 계정 수동 선택 후 새 입력 가능" }
         else if toolWaiting { message = "계정 \(slot.uppercased()) · CLI 도구 결과 대기" }
         else if busy { message = "계정 \(slot.uppercased()) 요청 처리 중" }
         else { message = connected ? "계정 \(slot.uppercased()) · CLI 입력 대기" : "CLI 연결 명령을 복사해 터미널에서 실행하세요" }
@@ -226,7 +229,7 @@ final class DirectProxyStore: ObservableObject {
         generation = UUID()
         let owned = child; child = nil
         try? input?.fileHandleForWriting.close(); input = nil
-        ready = false; starting = false; pending = false; busy = false; failed = false; toolWaiting = false
+        ready = false; starting = false; pending = false; busy = false; failed = false; canRecoverCurrent = false; toolWaiting = false
         connected = false; home = nil; waitingStatus = false; uncertain = false; lastRead = .distantPast
         if let owned {
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if owned.isRunning { owned.terminate() } }

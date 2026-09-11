@@ -414,7 +414,7 @@ struct MenuPanel: View {
                 }
             }
             HStack {
-                Button(selected ? "\(account.slot.uppercased()) 선택됨" : "\(account.slot.uppercased())로 전환") {
+                Button(selected && direct.canRecoverCurrent ? "복구 준비 · 새 입력 대기" : selected ? "\(account.slot.uppercased()) 선택됨" : "\(account.slot.uppercased())로 전환") {
                     direct.select(account.slot)
                 }
                 .disabled(store.demo || login.busy || !direct.canSelect(account.slot) || stale || account.state != "ok" || (account.usage?.remainingPercent ?? 0) <= 5)

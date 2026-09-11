@@ -4,6 +4,8 @@
 - 날짜: 2026-09-10
 - 관련: ADR 0043, 0045, 0048
 
+2026-09-11: 독립 daemon의 crash 복구·연결 정보와 compaction 소유권 해시 보존은 [ADR 0055](0055-proxy-crash-session-recovery.md)가 아래 재시작 시 유실 설명을 대체합니다.
+
 ## 확인한 동작
 
 설치된 Codex CLI 0.153.4는 현재 `switch_probe` 커스텀 provider에서 일반 `/responses`로 텍스트 요약을 만든다. 합성 usage token 수와 테스트 실행에만 적용한 model_auto_compact_token_limit으로 자동 압축을 유발했다. CLI의 로컬 `compacted` 기록, 이후 요청에 요약 포함, 같은 thread를 B로 전환한 뒤에도 요약 포함을 확인했다. 따라서 이전 문서의 '모든 compaction 미지원' 표현은 이 경로에는 맞지 않는다. 테스트용 임계값을 실제 앱 프로필에 적용하지 않는다.

@@ -168,6 +168,10 @@ func switchProbeWithUsage(args []string, input io.Reader, output io.Writer, acce
 
 // Timing overrides are for synthetic tests only, never CLI flags.
 func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration) error {
+	return switchProbeWithCheckpoint(args, input, output, access, upstream, fetcher, interval, cooldown, "")
+}
+
+func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration, checkpointDir string) error {
 	f := flag.NewFlagSet("switch-probe", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	confirm := f.Bool("allow-live", false, "explicit live-account experiment")
@@ -186,8 +190,21 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	var saved *probeCheckpoint
+	var checkpointErr error
+	if checkpointDir != "" {
+		saved, checkpointErr = readProbeCheckpoint(checkpointDir)
+		if checkpointErr != nil {
+			return checkpointErr
+		}
+	}
 	secret := newDirectSecret()
+	if saved != nil {
+		secret = saved.Secret
+	}
 	var mu sync.Mutex
+	var handlers sync.WaitGroup
+	closing := false
 	slot, session := "a", ""
 	busy, failed := false, false
 	turnPending, previousSlot := false, ""
@@ -220,6 +237,40 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 		}
 	}()
 	var revision uint64
+	if saved != nil {
+		slot, session, previousSlot = saved.Slot, saved.Session, saved.PreviousSlot
+		chosen, failed = saved.Chosen, saved.Failed || saved.Busy || saved.TurnPending
+		recoveryRequired = saved.RecoveryRequired || session != ""
+		lastBodyHash, lastUserBoundary = saved.LastBody, saved.LastUser
+		revision, opaqueSlot = saved.Revision+1, saved.OpaqueSlot
+		for _, owner := range saved.Owners {
+			compactOwners[owner.Key] = probeCompactOwner{owner.Slot, owner.Credential}
+		}
+	}
+	var checkpointAddress, checkpointHome string
+	checkpointRetired := false
+	persist := func() bool {
+		if checkpointDir == "" {
+			return true
+		}
+		if checkpointErr != nil {
+			return false
+		}
+		c := &probeCheckpoint{Retired: checkpointRetired, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
+			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
+			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
+			LastBody: lastBodyHash, LastUser: lastUserBoundary, Revision: revision, OpaqueSlot: opaqueSlot}
+		for key, owner := range compactOwners {
+			c.Owners = append(c.Owners, probeCheckpointOwner{key, owner.credential, owner.slot})
+		}
+		checkpointErr = writeProbeCheckpoint(checkpointDir, c)
+		if checkpointErr != nil {
+			failed = true
+			cancel()
+			return false
+		}
+		return true
+	}
 	var outMu sync.Mutex
 	report := func(v any) { outMu.Lock(); defer outMu.Unlock(); _ = json.NewEncoder(output).Encode(v) }
 	refreshEvent := func(id uint64, status string, succeeded bool) {
@@ -298,12 +349,16 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 	}
 	// Caller holds mu. A single ordered pipe carries observations and acknowledgments.
 	state := func(event string, accepted bool) {
+		if !persist() {
+			accepted = false
+		}
 		if !busy && !turnPending && turnLease != nil {
 			turnLease.Close()
 			turnLease = nil
 		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending, "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
-			"can_abandon_turn": probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)})
+			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending,
+			"can_abandon_turn":    probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)})
 	}
 	resolve := func(r *http.Request) (proxy.Identity, error) {
 		mu.Lock()
@@ -324,6 +379,9 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 			return err
 		}
 		opaqueSlot = slot
+		if !persist() {
+			return errCheckpoint
+		}
 		return nil
 	}
 	h, err := proxy.New(upstream, resolve)
@@ -334,12 +392,23 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 		h.ValidateCompaction = validateCompact
 	}
 	defer func() { mu.Lock(); defer mu.Unlock(); h.Close() }()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	address := "127.0.0.1:0"
+	if saved != nil {
+		address = saved.Address
+	}
+	listener, err := net.Listen("tcp4", address)
 	if err != nil {
 		return errors.New("probe_listen_failed")
 	}
 	defer listener.Close()
-	home, err := os.MkdirTemp("", "switcher-probe-")
+	var home string
+	if saved != nil {
+		home = saved.Home
+		err = privateServiceDir(home)
+	} else {
+		home, err = os.MkdirTemp(checkpointDir, "switcher-probe-")
+	}
+	checkpointAddress, checkpointHome = listener.Addr().String(), home
 	if err != nil {
 		return errors.New("probe_home_failed")
 	}
@@ -361,16 +430,42 @@ stream_max_retries = 0
 X-Switcher-Run = %q
 `, "http://"+listener.Addr().String(), secret)
 	path := filepath.Join(home, "config.toml")
-	if os.WriteFile(path, []byte(profile), 0600) != nil {
+	if saved != nil {
+		f, e := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if e != nil {
+			return errors.New("probe_profile_failed")
+		}
+		info, e := f.Stat()
+		f.Close()
+		if e != nil {
+			return errors.New("probe_profile_failed")
+		}
+		st, owned := info.Sys().(*syscall.Stat_t)
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || !owned || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 {
+			return errors.New("probe_profile_failed")
+		}
+	} else if writeProbeProfile(path, []byte(profile)) != nil {
 		return errors.New("probe_profile_failed")
 	}
 	defer func() {
+		if checkpointDir != "" {
+			return
+		}
 		actual, err := os.ReadFile(path)
 		if err == nil && bytes.Equal(actual, []byte(profile)) {
 			_ = os.Remove(path)
 		}
 	}()
 	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if closing {
+			mu.Unlock()
+			http.Error(w, "proxy_service_stopping", 503)
+			return
+		}
+		handlers.Add(1)
+		mu.Unlock()
+		defer handlers.Done()
 		if len(r.Header.Values("X-Switcher-Run")) != 1 || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Switcher-Run")), []byte(secret)) != 1 {
 			http.Error(w, "probe_unauthorized", 401)
 			return
@@ -413,7 +508,7 @@ X-Switcher-Run = %q
 			mu.Unlock()
 			return
 		}
-		if code := probeAdmissionCode(err, busy, failed, session, id); code != "" {
+		if code := probeAdmissionCode(err, busy, failed || checkpointErr != nil, session, id); code != "" {
 			mu.Unlock()
 			http.Error(w, code, 409)
 			report(map[string]any{"event": "probe_blocked", "code": code,
@@ -465,6 +560,12 @@ X-Switcher-Run = %q
 		selected := slot
 		owner := previousSlot
 		state("probe_state", false)
+		if checkpointErr != nil {
+			busy = false
+			mu.Unlock()
+			http.Error(w, "proxy_checkpoint_unavailable", 503)
+			return
+		}
 		mu.Unlock()
 		completed := false
 		attempted := false
@@ -572,7 +673,12 @@ X-Switcher-Run = %q
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		mu.Lock()
 		recoveryRequired = false
+		stored := persist()
 		mu.Unlock()
+		if !stored {
+			http.Error(w, "proxy_checkpoint_unavailable", 503)
+			return
+		}
 		r.ContentLength = int64(len(body))
 		turn := &probeTurnWriter{ResponseWriter: w, holdTerminal: *toolsMode, onTerminal: func() { mu.Lock(); terminalReady = true; state("probe_state", false); mu.Unlock() }}
 		attempted = true
@@ -595,6 +701,9 @@ X-Switcher-Run = %q
 			}
 		}
 		completed = !failed
+		if !persist() {
+			completed = false
+		}
 		mu.Unlock()
 		if *toolsMode && !compact && !turn.valid() && d.Status == http.StatusOK {
 			d.ResponseFailure = "probe_tool_response_unsupported"
@@ -608,13 +717,19 @@ X-Switcher-Run = %q
 		}
 	})}
 	defer server.Close()
-	go server.Serve(listener)
 	instruction := "Run CODEX_HOME=<codex_home> codex in another terminal. After a completed reply, type b here. No hooks. Plain text only. Local history remains in this temporary directory."
 	if *toolsMode {
 		instruction = "Run CODEX_HOME=<codex_home> codex in another terminal. Experimental local tools; read-only sandbox by default. Switch after the whole tool turn finishes. CLI text compaction is portable; native encrypted compaction is pinned to its originating account. Server references are unsupported."
 	}
-	report(map[string]any{"event": "probe_ready", "slot": "a", "codex_home": home, "instruction": instruction})
 	mu.Lock()
+	stored := persist()
+	mu.Unlock()
+	if !stored {
+		return errCheckpoint
+	}
+	go server.Serve(listener)
+	mu.Lock()
+	report(map[string]any{"event": "probe_ready", "slot": slot, "codex_home": home, "instruction": instruction})
 	state("probe_state", false)
 	mu.Unlock()
 	go func() {
@@ -622,13 +737,18 @@ X-Switcher-Run = %q
 		for s.Scan() {
 			target := s.Text()
 			mu.Lock()
+			if closing {
+				mu.Unlock()
+				return
+			}
 			expected := revision
 			if *managed {
 				var command struct {
-					Action    string `json:"action"`
-					Slot      string `json:"slot"`
-					Revision  uint64 `json:"revision"`
-					RequestID uint64 `json:"request_id"`
+					Action     string `json:"action"`
+					NewSession bool   `json:"new_session"`
+					Slot       string `json:"slot"`
+					Revision   uint64 `json:"revision"`
+					RequestID  uint64 `json:"request_id"`
 				}
 				if json.Unmarshal(s.Bytes(), &command) != nil {
 					state("probe_selection", false)
@@ -658,6 +778,9 @@ X-Switcher-Run = %q
 				}
 				if command.Action == "shutdown" {
 					ok := !busy && !waiting && !turnPending
+					if ok && command.NewSession {
+						checkpointRetired = true
+					}
 					state("probe_shutdown", ok)
 					if ok {
 						failed = true
@@ -724,7 +847,7 @@ X-Switcher-Run = %q
 				}
 				target, expected = command.Slot, command.Revision
 			}
-			recovering := failed && target != slot
+			recovering := failed && (target != slot || checkpointDir != "")
 			ok := probeSelectionAllowed(target, expected, revision, busy || turnPending || waiting, failed && !recovering)
 			if opaqueSlot != "" && target != opaqueSlot {
 				ok = false
@@ -764,5 +887,13 @@ X-Switcher-Run = %q
 		cancel()
 	}()
 	<-ctx.Done()
-	return nil
+	mu.Lock()
+	closing = true
+	mu.Unlock()
+	// Finish all state writes before the daemon releases its lifetime lock.
+	server.Close()
+	handlers.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	return checkpointErr
 }

@@ -4,6 +4,8 @@
 - 날짜: 2026-09-11
 - 관련: ADR 0001, 0034, 0041, 0048, 0053
 
+2026-09-11: 독립 daemon의 crash 복구·연결 정보와 compaction 소유권 해시 보존은 [ADR 0055](0055-proxy-crash-session-recovery.md)가 아래 재시작 시 유실 설명을 대체합니다.
+
 ## 결정과 선택지
 
 메뉴바 앱이 소유하던 `switch-probe --managed`를 독립 프로세스 `proxy-daemon` 안에서 실행한다. 앱은 `proxy-connect` relay만 소유한다. 기존 stdin JSON 명령·상태 형식과 프록시의 전환/실패/도구/압축 정책을 재사용한다.

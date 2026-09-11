@@ -88,8 +88,11 @@ struct DirectProxyCheck {
         precondition(store.slot == "a" && store.canSelect("b") && !store.canSelect("a"))
         store.failed = true
         precondition(store.canSelect("b") && !store.canSelect("a"))
+        store.canRecoverCurrent = true
+        precondition(store.canSelect("a"))
         store.busy = true
-        precondition(!store.canSelect("b"))
+        precondition(!store.canSelect("a") && !store.canSelect("b"))
+        store.canRecoverCurrent = false
         store.busy = false
         store.select("b")
         precondition(store.pending && !store.canSelect("a"))

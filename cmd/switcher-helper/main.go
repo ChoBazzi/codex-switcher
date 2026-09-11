@@ -24,8 +24,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "proxy-stop" {
-		if err := proxyStop(); err != nil {
+	if (len(os.Args) == 2 || (len(os.Args) == 3 && os.Args[2] == "--new-session")) && os.Args[1] == "proxy-stop" {
+		if err := proxyStopSession(len(os.Args) == 3); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
