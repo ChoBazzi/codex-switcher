@@ -237,6 +237,16 @@ struct MenuPanel: View {
     private let activeBlue = Color(red: 0.12, green: 0.25, blue: 0.68)
 
     var body: some View {
+        if showingCodexSettings {
+            CodexSettingsPanel(settings: codexSettings, direct: direct) {
+                showingCodexSettings = false
+            }
+        } else {
+            accountPanel
+        }
+    }
+
+    private var accountPanel: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "arrow.triangle.swap").foregroundStyle(.blue)
@@ -328,9 +338,6 @@ struct MenuPanel: View {
                     Button(direct.connected ? "대화 재개 명령 복사" : "Codex CLI 연결 명령 복사") {
                         direct.copyCommand(resume: direct.connected)
                     }.disabled(!direct.ready)
-                }
-                .sheet(isPresented: $showingCodexSettings) {
-                    CodexSettingsPanel(settings: codexSettings, direct: direct)
                 }
                 if !direct.ready || direct.failed {
                     Button(direct.starting ? "프록시 시작 중…" : (direct.ready && direct.failed ? "사용 가능한 계정으로 복구 준비" : "모델 프록시 다시 연결")) {
@@ -516,7 +523,7 @@ struct MenuPanel: View {
 struct CodexSettingsPanel: View {
     @ObservedObject var settings: CodexSettingsStore
     @ObservedObject var direct: DirectProxyStore
-    @Environment(\.dismiss) private var dismiss
+    var onClose: () -> Void = {}
     @State private var confirmDiscard = false
     @State private var confirmReload = false
 
@@ -550,7 +557,10 @@ struct CodexSettingsPanel: View {
                 HStack {
                     Text("저장하지 않은 변경을 버릴까요?").font(.caption)
                     Button("계속 편집") { confirmDiscard = false }
-                    Button("변경 버리고 닫기") { dismiss() }
+                    Button("변경 버리고 돌아가기") {
+                        settings.load(home: direct.home)
+                        onClose()
+                    }
                 }
             }
             if confirmReload {
@@ -570,9 +580,9 @@ struct CodexSettingsPanel: View {
                     else if let home = settings.home { settings.load(home: home) }
                 }.disabled(settings.home == nil)
                 Spacer()
-                Button("닫기") {
+                Button("계정 목록으로") {
                     confirmReload = false
-                    if settings.dirty { confirmDiscard = true } else { dismiss() }
+                    if settings.dirty { confirmDiscard = true } else { onClose() }
                 }
                 Button("현재 파일 저장") { settings.save() }.disabled(!settings.canSave)
             }
@@ -581,8 +591,10 @@ struct CodexSettingsPanel: View {
         }
         .padding(24)
         .frame(width: 620)
-        .interactiveDismissDisabled(settings.dirty)
-        .onAppear { settings.load(home: direct.home) }
+        .onAppear {
+            // MenuBarExtra can disappear on outside clicks; preserve an editing draft.
+            if !settings.dirty { settings.load(home: direct.home) }
+        }
         .onChange(of: direct.home) { home in
             if !settings.dirty { settings.load(home: home) }
         }

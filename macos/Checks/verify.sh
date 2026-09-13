@@ -24,6 +24,10 @@ if rg -q 'ScrollView' macos/Sources/CodexSwitcher/CodexSwitcherApp.swift || ! rg
     echo 'FAIL: account overview must use the non-scrolling two-column grid.'
     exit 1
 fi
+if rg -q '\.sheet\(' macos/Sources/CodexSwitcher/CodexSwitcherApp.swift; then
+    echo 'FAIL: settings must stay inside the menu window to preserve focus.'
+    exit 1
+fi
 go test -race ./...
 go vet ./...
 go build -o bin/switcher-helper ./cmd/switcher-helper
