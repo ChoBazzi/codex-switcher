@@ -223,6 +223,8 @@ struct CodexSwitcherApp: App {
 
 struct MenuPanel: View {
     @State private var logoutConfirmation = LogoutConfirmation()
+    @StateObject private var codexSettings = CodexSettingsStore()
+    @State private var showingCodexSettings = false
     @ObservedObject var store: MenuStore
     @ObservedObject var login: AccountLoginStore
     @ObservedObject var direct: DirectProxyStore
@@ -321,11 +323,24 @@ struct MenuPanel: View {
                     Button("CLI 중단 확인 · 전환 잠금 해제") { direct.abandonTurn() }
                         .disabled(login.busy || !direct.canAbandonTurn)
                 }
-                Button("Codex CLI 연결 명령 복사") { direct.copyCommand() }.disabled(!direct.ready)
+                HStack {
+                    Button("Codex 설정") { showingCodexSettings = true }
+                    Button(direct.connected ? "대화 재개 명령 복사" : "Codex CLI 연결 명령 복사") {
+                        direct.copyCommand(resume: direct.connected)
+                    }.disabled(!direct.ready)
+                }
+                .sheet(isPresented: $showingCodexSettings) {
+                    CodexSettingsPanel(settings: codexSettings, direct: direct)
+                }
                 if !direct.ready || direct.failed {
-                    Button(direct.starting ? "프록시 시작 중…" : "모델 프록시 다시 연결") {
-                        if let helper = store.helper { direct.start(helper: helper) }
-                    }.disabled(direct.starting || direct.busy || store.helper == nil || login.busy)
+                    Button(direct.starting ? "프록시 시작 중…" : (direct.ready && direct.failed ? "사용 가능한 계정으로 복구 준비" : "모델 프록시 다시 연결")) {
+                        if direct.ready && direct.failed { direct.prepareRecovery() }
+                        else if let helper = store.helper { direct.start(helper: helper) }
+                    }.disabled(direct.starting || (direct.ready && (direct.busy || direct.pending)) || store.helper == nil || login.busy)
+                    if direct.failed {
+                        Text("CLI가 입력창으로 돌아온 뒤 복구 준비를 누르고 새 지시를 입력하세요. 실패한 요청은 재전송하지 않습니다.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
                 Text(store.sessionMessage)
                     .font(.caption).foregroundStyle(.secondary)
@@ -493,6 +508,83 @@ struct MenuPanel: View {
             } else {
                 Text("초기화 시각 미확인").font(.caption2).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+
+struct CodexSettingsPanel: View {
+    @ObservedObject var settings: CodexSettingsStore
+    @ObservedObject var direct: DirectProxyStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmDiscard = false
+    @State private var confirmReload = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Codex 파일 설정").font(.title2.bold())
+            Text("앱 연결용 CODEX_HOME의 설정과 공통 작업 지침을 편집합니다.")
+                .font(.callout).foregroundStyle(.secondary)
+            Text(settings.home ?? "프록시 연결 후 파일을 불러올 수 있습니다.")
+                .font(.caption.monospaced()).textSelection(.enabled)
+            Picker("파일", selection: $settings.selected) {
+                ForEach(CodexSettingsStore.files, id: \.self) { file in
+                    Text(file + (settings.isDirty(file) ? " · 수정됨" : "")).tag(file)
+                }
+            }.pickerStyle(.segmented)
+            TextEditor(text: Binding(get: { settings.drafts[settings.selected] ?? "" },
+                                     set: { settings.drafts[settings.selected] = $0 }))
+                .font(.system(.body, design: .monospaced))
+                .disableAutocorrection(true)
+                .frame(height: 340)
+                .border(Color.secondary.opacity(0.3))
+                .disabled(settings.drafts[settings.selected] == nil)
+            Text(settings.selected == "config.toml"
+                 ? "TOML 원문을 저장합니다. 프록시 연결 설정과 재시도 0 값은 유지하세요. 문법 검사는 Codex 실행 시 수행됩니다."
+                 : "이 CLI 홈에서 사용할 공통 지침입니다. 프로젝트별 AGENTS.md도 함께 적용될 수 있습니다.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let message = settings.message {
+                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+            }
+            if confirmDiscard {
+                HStack {
+                    Text("저장하지 않은 변경을 버릴까요?").font(.caption)
+                    Button("계속 편집") { confirmDiscard = false }
+                    Button("변경 버리고 닫기") { dismiss() }
+                }
+            }
+            if confirmReload {
+                HStack {
+                    Text("초안을 버리고 두 파일을 다시 불러올까요?").font(.caption)
+                    Button("취소") { confirmReload = false }
+                    Button("버리고 불러오기") {
+                        if let home = settings.home { settings.load(home: home) }
+                        confirmReload = false
+                    }
+                }
+            }
+            HStack {
+                Button("다시 불러오기") {
+                    confirmDiscard = false
+                    if settings.dirty { confirmReload = true }
+                    else if let home = settings.home { settings.load(home: home) }
+                }.disabled(settings.home == nil)
+                Spacer()
+                Button("닫기") {
+                    confirmReload = false
+                    if settings.dirty { confirmDiscard = true } else { dismiss() }
+                }
+                Button("현재 파일 저장") { settings.save() }.disabled(!settings.canSave)
+            }
+            Text("저장 후 현재 CLI 작업을 마치고 종료한 뒤 같은 대화를 재개하세요.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .frame(width: 620)
+        .interactiveDismissDisabled(settings.dirty)
+        .onAppear { settings.load(home: direct.home) }
+        .onChange(of: direct.home) { home in
+            if !settings.dirty { settings.load(home: home) }
         }
     }
 }

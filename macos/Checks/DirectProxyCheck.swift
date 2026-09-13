@@ -17,6 +17,12 @@ struct DirectProxyCheck {
             while let line = readLine(), let data = line.data(using: .utf8),
                   let command = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if command["action"] as? String == "status" { state("probe_state"); continue }
+                if command["action"] as? String == "recover" {
+                    let accepted = failed && !toolWaiting && command["revision"] as? Int == revision
+                    if accepted { slot = "b"; failed = false; revision += 1 }
+                    state("probe_selection", accepted)
+                    continue
+                }
                 if command["action"] as? String == "abandon_turn" {
                     let accepted = toolWaiting && command["revision"] as? Int == revision
                     if accepted { toolWaiting = false; failed = true; revision += 1 }
@@ -57,6 +63,50 @@ struct DirectProxyCheck {
             }
             fatalError("direct proxy check timed out")
         }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = directory.appendingPathComponent("config.toml")
+        let original = "# preserve comments\nmodel = \"synthetic-model\"\n"
+        try Data(original.utf8).write(to: config)
+        let settings = CodexSettingsStore()
+        settings.load(home: directory.path)
+        precondition(settings.drafts["config.toml"] == original && !settings.dirty)
+        precondition(settings.drafts["AGENTS.md"] == "")
+        settings.drafts["config.toml"] = original + "model_reasoning_effort = \"high\"\n"
+        precondition(settings.canSave && settings.save() && !settings.dirty)
+        let savedConfig = try String(contentsOf: config, encoding: .utf8)
+        precondition(savedConfig == settings.drafts["config.toml"])
+        settings.selected = "AGENTS.md"
+        settings.drafts["AGENTS.md"] = "# 합성 지침\n테스트 먼저 실행하기\n"
+        precondition(settings.save())
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("AGENTS.md").path)
+        precondition((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+        settings.selected = "config.toml"
+        settings.drafts["config.toml"] = "draft"
+        try Data("external edit".utf8).write(to: config)
+        precondition(!settings.save() && settings.drafts["config.toml"] == "draft")
+        let external = try String(contentsOf: config, encoding: .utf8)
+        precondition(external == "external edit")
+        settings.load(home: directory.path)
+        precondition(!settings.dirty && settings.drafts["config.toml"] == external)
+        try FileManager.default.removeItem(at: config)
+        try FileManager.default.createSymbolicLink(at: config, withDestinationURL: directory.appendingPathComponent("AGENTS.md"))
+        settings.load(home: directory.path)
+        precondition(settings.drafts["config.toml"] == nil && !settings.save())
+        settings.load(home: nil)
+        precondition(settings.home == nil && settings.drafts.isEmpty && !settings.canSave)
+        let command = DirectProxyStore.connectionCommand(home: "/private/tmp/synthetic home'quoted", resume: true)
+        let shell = Process(), capture = Pipe()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", "codex() { printf '%s\\n' \"$CODEX_HOME\" \"$@\"; }; " + command]
+        shell.standardOutput = capture
+        try shell.run()
+        let captured = capture.fileHandleForReading.readDataToEndOfFile()
+        shell.waitUntilExit()
+        precondition(shell.terminationStatus == 0)
+        precondition(String(data: captured, encoding: .utf8) == "/private/tmp/synthetic home'quoted\nresume\n")
+        print("PASS: file settings read, edit, private save, creation, conflict, symlink rejection and resume quoting")
         let store = DirectProxyStore(usageReadTimeout: 200_000_000)
         var usageCount = 0
         var unavailableCount = 0
@@ -111,6 +161,15 @@ struct DirectProxyCheck {
         precondition(store.pending && !store.canAbandonTurn)
         try await waitFor { !store.pending }
         precondition(store.failed && !store.busy && store.canSelect("a") && !store.canAbandonTurn)
+        store.prepareRecovery()
+        precondition(store.pending)
+        try await waitFor { !store.pending }
+        precondition(store.slot == "b" && !store.failed && store.message.contains("CLI 입력 대기"))
+        // A lost relay can leave the last observed busy bit set.
+        store.ready = false; store.busy = true
+        store.start(helper: URL(fileURLWithPath: CommandLine.arguments[0]))
+        try await waitFor { store.ready }
+        precondition(!store.busy)
         store.poll()
         store.stop()
         try await Task.sleep(nanoseconds: 100_000_000)

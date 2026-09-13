@@ -9,6 +9,20 @@ struct MenuLayoutCheck {
         let store = MenuStore()
         defer { store.shutdown() }
         precondition(store.accounts.count == 5)
+        let settings = CodexSettingsStore()
+        for scheme in [ColorScheme.light, .dark] {
+            let renderer = ImageRenderer(content: CodexSettingsPanel(settings: settings, direct: store.direct)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .environment(\.colorScheme, scheme).fixedSize())
+            guard let image = renderer.nsImage else { fatalError("settings render failed") }
+            precondition(image.size.width <= 640 && image.size.height < 750, "settings panel exceeds size budget")
+            if let path = ProcessInfo.processInfo.environment["SWITCHER_LAYOUT_PREVIEW"],
+               let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+               let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: URL(fileURLWithPath: path + "-settings-\(scheme == .light ? "light" : "dark").png"))
+            }
+            print("PASS: Codex settings render \(scheme), \(Int(image.size.width))×\(Int(image.size.height))")
+        }
         for count in [0, 1, 2, 3, 5] {
             let saved = store.accounts
             store.accounts = Array(saved.prefix(count))

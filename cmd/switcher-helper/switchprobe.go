@@ -845,14 +845,27 @@ X-Switcher-Run = %q
 					mu.Unlock()
 					continue
 				}
-				if command.Action != "select" {
+				if command.Action == "recover" {
+					// Explicit preparation only: never dispatch or replay a model request.
+					if !*automatic || !failed || busy || turnPending || waiting || command.Revision != revision {
+						state("probe_selection", false)
+						mu.Unlock()
+						continue
+					}
+					target, _ = probeQuotaSelection("", samples, time.Now())
+					if opaqueSlot != "" {
+						// Encrypted history must stay with its verified owner.
+						target, _ = probeQuotaSelection(opaqueSlot, samples, time.Now())
+					}
+					command.Slot = target
+				} else if command.Action != "select" {
 					state("probe_selection", false)
 					mu.Unlock()
 					continue
 				}
 				target, expected = command.Slot, command.Revision
 			}
-			recovering := failed && (target != slot || checkpointDir != "")
+			recovering := failed && (target != slot || checkpointDir != "" || *automatic)
 			ok := probeSelectionAllowed(target, expected, revision, busy || turnPending || waiting, failed && !recovering)
 			if opaqueSlot != "" && target != opaqueSlot {
 				ok = false

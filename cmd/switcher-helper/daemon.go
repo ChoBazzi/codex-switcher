@@ -203,7 +203,7 @@ func (b *serviceBroker) attach(conn net.Conn) {
 		var action string
 		_ = json.Unmarshal(command["action"], &action)
 		switch action {
-		case "status", "usage", "select", "abandon_turn", "account_changing", "account_changed", "shutdown":
+		case "status", "usage", "select", "recover", "abandon_turn", "account_changing", "account_changed", "shutdown":
 		case "usage_refresh":
 			var id uint64
 			if json.Unmarshal(command["request_id"], &id) != nil || id == 0 {

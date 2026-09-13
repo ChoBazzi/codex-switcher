@@ -42,7 +42,9 @@ final class DirectProxyStore: ObservableObject {
     }
 
     func start(helper: URL) {
-        guard !busy && !starting else { return }
+        // A stale busy observation must not prevent reconnecting a dead relay.
+        // Detaching the relay never cancels a live daemon/model request.
+        guard !(ready && busy) && !starting else { return }
         stop()
         let run = UUID(); generation = run
         let process = Process(), source = Pipe(), sink = Pipe()
@@ -151,6 +153,11 @@ final class DirectProxyStore: ObservableObject {
         control(["action": "select", "slot": target, "revision": revision])
     }
 
+    func prepareRecovery() {
+        guard ready, failed, !busy, !pending else { return }
+        control(["action": "recover", "revision": revision])
+    }
+
     func abandonTurn() {
         guard canAbandonTurn else { return }
         control(["action": "abandon_turn", "slot": slot, "revision": revision])
@@ -211,11 +218,15 @@ final class DirectProxyStore: ObservableObject {
         send(["action":changing ? "account_changing" : "account_changed", "slot":slot])
     }
 
-    func copyCommand() {
-        guard ready, let home else { return }
+    static func connectionCommand(home: String, resume: Bool) -> String {
         let quoted = "'" + home.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+        return "CODEX_HOME=\(quoted) codex" + (resume ? " resume" : "")
+    }
+
+    func copyCommand(resume: Bool = false) {
+        guard ready, let home else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("CODEX_HOME=\(quoted) codex", forType: .string)
+        NSPasteboard.general.setString(Self.connectionCommand(home: home, resume: resume), forType: .string)
     }
 
     private func ended(run: UUID) {
@@ -234,6 +245,75 @@ final class DirectProxyStore: ObservableObject {
         if let owned {
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if owned.isRunning { owned.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if owned.isRunning { kill(owned.processIdentifier, SIGKILL) } }
+        }
+    }
+}
+
+/// Edits only the two explicitly named files in the selected CLI home.
+@MainActor
+final class CodexSettingsStore: ObservableObject {
+    static let files = ["config.toml", "AGENTS.md"]
+    @Published var selected = "config.toml"
+    @Published var drafts: [String: String] = [:]
+    @Published private(set) var home: String?
+    @Published private(set) var message: String?
+    private var originals: [String: Data] = [:]
+    private var loaded: Set<String> = []
+    private var existed: Set<String> = []
+    var dirty: Bool { Self.files.contains { isDirty($0) } }
+    var canSave: Bool { loaded.contains(selected) && (isDirty(selected) || !existed.contains(selected)) }
+    func isDirty(_ file: String) -> Bool {
+        loaded.contains(file) && Data((drafts[file] ?? "").utf8) != originals[file]
+    }
+    private func read(_ url: URL) throws -> Data? {
+        let fm = FileManager.default
+        do {
+            let attributes = try fm.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= 1_048_576 else {
+                throw CocoaError(.fileReadUnknown)
+            }
+            return try Data(contentsOf: url)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(error.code) {
+            return nil
+        }
+    }
+    func load(home: String?) {
+        self.home = home
+        drafts = [:]; originals = [:]; loaded = []; existed = []; message = nil
+        guard let home else { return }
+        for file in Self.files {
+            do {
+                let data = try read(URL(fileURLWithPath: home).appendingPathComponent(file))
+                guard let text = String(data: data ?? Data(), encoding: .utf8) else { throw CocoaError(.fileReadInapplicableStringEncoding) }
+                drafts[file] = text; originals[file] = data ?? Data(); loaded.insert(file)
+                if data != nil { existed.insert(file) }
+            } catch { message = "\(file)을 읽지 못했습니다. 일반 UTF-8 파일과 접근 권한을 확인하세요." }
+        }
+    }
+    @discardableResult
+    func save() -> Bool {
+        guard let home, loaded.contains(selected) else { return false }
+        let url = URL(fileURLWithPath: home).appendingPathComponent(selected)
+        do {
+            let current = try read(url)
+            guard (current != nil) == existed.contains(selected), current ?? Data() == originals[selected] else {
+                message = "파일이 외부에서 변경됐습니다. 초안을 따로 복사한 뒤 다시 불러오세요."
+                return false
+            }
+            let data = Data((drafts[selected] ?? "").utf8)
+            guard data.count <= 1_048_576 else { message = "파일은 1MB 이하로 저장하세요."; return false }
+            // Atomic replacement and private permissions, including newly created AGENTS.md.
+            let temporary = url.deletingLastPathComponent().appendingPathComponent(".codex-edit-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            guard FileManager.default.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]),
+                  rename(temporary.path, url.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+            originals[selected] = data; existed.insert(selected)
+            message = "\(selected)을 저장했습니다. 다음 CLI 실행부터 사용하세요."
+            return true
+        } catch {
+            message = "저장하지 못했습니다. 파일 상태와 폴더 접근 권한을 확인하세요."
+            return false
         }
     }
 }
