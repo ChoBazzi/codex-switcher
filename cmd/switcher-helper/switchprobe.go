@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -236,9 +237,45 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			turnLease.Close()
 		}
 	}()
+	auxiliary := map[string]*probeAuxiliary{}
+	auxActive := func() bool {
+		for _, a := range auxiliary {
+			if a.busy || a.pending {
+				return true
+			}
+		}
+		return false
+	}
+	auxBusy := func() bool {
+		for _, a := range auxiliary {
+			if a.busy {
+				return true
+			}
+		}
+		return false
+	}
+	auxPending := func() bool {
+		for _, a := range auxiliary {
+			if a.pending {
+				return true
+			}
+		}
+		return false
+	}
+	defer func() {
+		for _, a := range auxiliary {
+			if a.handler != nil {
+				a.handler.Close()
+			}
+
+		}
+	}()
 	var revision uint64
 	if saved != nil {
 		slot, session, previousSlot = saved.Slot, saved.Session, saved.PreviousSlot
+		for _, binding := range saved.Auxiliary {
+			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true}
+		}
 		chosen, failed = saved.Chosen, saved.Failed || saved.Busy || saved.TurnPending
 		recoveryRequired = saved.RecoveryRequired || session != ""
 		lastBodyHash, lastUserBoundary = saved.LastBody, saved.LastUser
@@ -261,6 +298,10 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
 			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
 			LastBody: lastBodyHash, LastUser: lastUserBoundary, Revision: revision, OpaqueSlot: opaqueSlot}
+		for _, a := range auxiliary {
+			c.Auxiliary = append(c.Auxiliary, a.binding)
+		}
+		sort.Slice(c.Auxiliary, func(i, j int) bool { return c.Auxiliary[i].Thread < c.Auxiliary[j].Thread })
 		for key, owner := range compactOwners {
 			c.Owners = append(c.Owners, probeCheckpointOwner{key, owner.credential, owner.slot})
 		}
@@ -357,13 +398,13 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		if !persist() {
 			accepted = false
 		}
-		if !busy && !turnPending && turnLease != nil {
+		if !busy && !turnPending && !auxActive() && turnLease != nil {
 			turnLease.Close()
 			turnLease = nil
 		}
-		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending, "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
-			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending,
-			"can_abandon_turn":    probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)})
+		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending || auxActive(), "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
+			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending && !auxActive(),
+			"can_abandon_turn":    (!busy && !waiting && !auxBusy() && (auxPending() || probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)))})
 	}
 	resolve := func(r *http.Request) (proxy.Identity, error) {
 		mu.Lock()
@@ -480,6 +521,54 @@ X-Switcher-Run = %q
 			http.Error(w, "probe_unsupported_route", 404)
 			return
 		}
+		id, root, identityErr := cliidentity.Conversation(r.Header)
+		if *toolsMode && identityErr == nil && id != root {
+			mu.Lock()
+			if session != "" && root != session {
+				mu.Unlock()
+				http.Error(w, "probe_conversation_changed", 409)
+				return
+			}
+			a := auxiliary[id]
+			if a == nil {
+				if failed || checkpointErr != nil || len(auxiliary) >= 128 {
+					mu.Unlock()
+					http.Error(w, "probe_auxiliary_unavailable", 409)
+					return
+				}
+				if *automatic && !chosen {
+					next, reason := probeQuotaSelection("", samples, time.Now())
+					if next == "" {
+						mu.Unlock()
+						http.Error(w, reason, 409)
+						return
+					}
+					slot, chosen = next, true
+				}
+				if session == "" {
+					session = root
+				}
+				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}}
+				auxiliary[id] = a
+			}
+			mu.Unlock()
+			a.serve(w, r, &mu, access, upstream, secret, func() bool { revision++; state("probe_state", false); return checkpointErr == nil }, func() error {
+				if closing || checkpointErr != nil {
+					return errCheckpoint
+				}
+				if turnLease == nil {
+					if owner, ok := access.(interface{ BeginTurn() (io.Closer, error) }); ok {
+						lease, err := owner.BeginTurn()
+						if err != nil {
+							return err
+						}
+						turnLease = lease
+					}
+				}
+				return nil
+			})
+			return
+		}
 		id, err := cliidentity.ThreadID(r.Header)
 		mu.Lock()
 		waited := false
@@ -527,7 +616,7 @@ X-Switcher-Run = %q
 			http.Error(w, "probe_compaction_turn_pending", 409)
 			return
 		}
-		if *automatic && !turnPending {
+		if *automatic && !turnPending && !auxActive() {
 			current := ""
 			if chosen {
 				current = slot
@@ -782,7 +871,7 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "shutdown" {
-					ok := !busy && !waiting && !turnPending
+					ok := !busy && !waiting && !turnPending && !auxActive()
 					if ok && command.NewSession {
 						checkpointRetired = true
 					}
@@ -797,11 +886,18 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "abandon_turn" {
-					ok := command.Slot == slot && probeAbandonAllowed(command.Revision, revision, busy, waiting, turnPending, failed)
+					ok := command.Slot == slot && command.Revision == revision && !busy && !waiting && !auxBusy() && (auxPending() || probeAbandonAllowed(command.Revision, revision, busy, waiting, turnPending, failed))
 					if ok {
 						// This is the user's assertion that local CLI tools stopped,
 						// not an automatic cancellation inference or a successful turn.
 						turnPending, failed = false, true
+						for _, a := range auxiliary {
+							if a.pending {
+								a.pending = false
+								a.failed = true
+
+							}
+						}
 						revision++
 					}
 					state("probe_abandonment", ok)
@@ -847,7 +943,7 @@ X-Switcher-Run = %q
 				}
 				if command.Action == "recover" {
 					// Explicit preparation only: never dispatch or replay a model request.
-					if !*automatic || !failed || busy || turnPending || waiting || command.Revision != revision {
+					if !*automatic || !failed || busy || turnPending || waiting || auxActive() || command.Revision != revision {
 						state("probe_selection", false)
 						mu.Unlock()
 						continue
@@ -866,7 +962,7 @@ X-Switcher-Run = %q
 				target, expected = command.Slot, command.Revision
 			}
 			recovering := failed && (target != slot || checkpointDir != "" || *automatic)
-			ok := probeSelectionAllowed(target, expected, revision, busy || turnPending || waiting, failed && !recovering)
+			ok := probeSelectionAllowed(target, expected, revision, busy || turnPending || waiting || auxActive(), failed && !recovering)
 			if opaqueSlot != "" && target != opaqueSlot {
 				ok = false
 			}

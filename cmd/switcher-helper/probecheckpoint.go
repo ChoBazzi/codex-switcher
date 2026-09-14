@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"github.com/ChoBazzi/codex-switcher/internal/cliidentity"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +20,7 @@ var errCheckpoint = errors.New("proxy_checkpoint_unavailable")
 // No request/response bodies, OAuth credentials or account identifiers are stored.
 // Secret is only the local CLI-to-proxy capability, already present in config.toml.
 type probeCheckpoint struct {
+	Auxiliary                                           []probeAuxiliaryBinding `json:",omitempty"`
 	Retired                                             bool
 	Version                                             int
 	Address, Home, Secret                               string
@@ -72,6 +75,17 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		if !accountslot.Valid(o.Slot) {
 			return nil, errCheckpoint
 		}
+	}
+	seenAux := map[string]bool{}
+	if len(c.Auxiliary) > 128 {
+		return nil, errCheckpoint
+	}
+	for _, a := range c.Auxiliary {
+		headers := http.Header{"Thread-Id": []string{a.Thread}, "Session-Id": []string{a.Root}}
+		if _, _, err := cliidentity.Conversation(headers); err != nil || a.Thread == a.Root || a.Root != c.Session || !accountslot.Valid(a.Slot) || seenAux[a.Thread] {
+			return nil, errCheckpoint
+		}
+		seenAux[a.Thread] = true
 	}
 	if c.Retired {
 		return nil, nil

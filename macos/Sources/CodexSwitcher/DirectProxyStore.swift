@@ -118,7 +118,7 @@ final class DirectProxyStore: ObservableObject {
               let nextConnected = e.connected, let nextRevision = e.revision else { return }
         slot = nextSlot; busy = nextBusy; failed = nextFailed; connected = nextConnected
         canRecoverCurrent = e.can_recover_current == true && nextFailed && !nextBusy
-        toolWaiting = e.can_abandon_turn == true && nextBusy && !nextFailed
+        toolWaiting = e.can_abandon_turn == true && nextBusy
         revision = nextRevision; lastRead = Date(); waitingStatus = false
         ready = home != nil && !uncertain; starting = false
         if e.event == "probe_selection" || e.event == "probe_abandonment" {

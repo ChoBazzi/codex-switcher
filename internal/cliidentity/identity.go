@@ -34,3 +34,13 @@ func uuid(value string) bool {
 	}
 	return value != "00000000-0000-0000-0000-000000000000"
 }
+
+// Conversation validates the two independent identifiers used by auxiliary CLI
+// tasks. Authentication and parent binding remain the caller's responsibility.
+func Conversation(header http.Header) (thread, root string, err error) {
+	threads, sessions := header.Values("Thread-Id"), header.Values("Session-Id")
+	if len(threads) != 1 || len(sessions) != 1 || !uuid(threads[0]) || !uuid(sessions[0]) {
+		return "", "", ErrIdentity
+	}
+	return threads[0], sessions[0], nil
+}

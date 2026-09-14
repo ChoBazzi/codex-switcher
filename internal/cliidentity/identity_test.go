@@ -39,3 +39,27 @@ func TestThreadID(t *testing.T) {
 		})
 	}
 }
+
+func TestConversationIndependentIdentifiers(t *testing.T) {
+	const thread = "11111111-1111-4111-8111-111111111111"
+	const root = "22222222-2222-4222-8222-222222222222"
+	header := http.Header{"Thread-Id": []string{thread}, "Session-Id": []string{root}}
+	gotThread, gotRoot, err := Conversation(header)
+	if err != nil || gotThread != thread || gotRoot != root {
+		t.Fatal("independent identifiers rejected")
+	}
+	if _, err := ThreadID(header); err == nil {
+		t.Fatal("legacy strict contract changed")
+	}
+	for _, value := range []string{"", "malformed", "00000000-0000-0000-0000-000000000000"} {
+		header.Set("Session-Id", value)
+		if _, _, err := Conversation(header); err == nil {
+			t.Fatal("invalid root accepted")
+		}
+	}
+	header.Set("Session-Id", root)
+	header.Add("Thread-Id", thread)
+	if _, _, err := Conversation(header); err == nil {
+		t.Fatal("duplicate accepted")
+	}
+}

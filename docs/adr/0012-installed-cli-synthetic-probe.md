@@ -45,3 +45,7 @@ SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -v -timeout 100s ./internal/
 - [공식 Configuration Reference](https://learn.chatgpt.com/docs/config-file/config-reference): provider 전송 및 재시도 설정.
 - [공식 Advanced Configuration](https://learn.chatgpt.com/docs/config-file/config-advanced): 독립 profile 파일과 CODEX_HOME.
 - 로컬 `codex exec --help`, `codex exec resume --help` 및 합성 실행 결과.
+
+## 추가 호환성 관측 (2026-09-14)
+
+위 두 식별 헤더의 동일성은 당시 일반 exec/resume 경로에서 관측한 범위다. CLI 0.154.0의 리뷰·서브에이전트·자동 승인 요청은 정상 UUID인 두 헤더가 서로 달라 현재 프록시에서 차단됨을 확인했다. 지원 계약을 완화하지 않고 [부가 기능 호환성 조사](../cli-feature-compatibility.md)에 실제 프록시 재현 결과와 한계를 기록했다.

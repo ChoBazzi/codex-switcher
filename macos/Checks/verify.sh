@@ -33,7 +33,7 @@ go vet ./...
 go build -o bin/switcher-helper ./cmd/switcher-helper
 if command -v codex >/dev/null 2>&1; then
     SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -timeout 60s ./internal/directcli
-    SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -timeout 90s ./cmd/switcher-helper -run 'TestInstalledProbeParser|TestInstalledProbeTools|TestInstalledProbeCompaction|TestInstalledProbeCheckpoint|TestProbe'
+    SWITCHER_CODEX_INTEGRATION=1 go test -race -count=1 -timeout 90s ./cmd/switcher-helper -run 'TestInstalledProbeAuxiliaryIdentity|TestInstalledProbeParser|TestInstalledProbeTools|TestInstalledProbeCompaction|TestInstalledProbeCheckpoint|TestProbe'
 else
     echo 'SKIP: Codex CLI is not installed; installed-CLI synthetic test skipped.'
 fi
