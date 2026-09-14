@@ -41,10 +41,41 @@ final class DirectProxyStore: ObservableObject {
         ready && !busy && !pending && (target != slot || (failed && canRecoverCurrent)) && AccountSlots.all.contains(target)
     }
 
+    @Published private(set) var stopping = false
+    private var shutdownAccepted = false
+    private var shutdownCompletion: ((Bool) -> Void)?
+    private var shutdownID = UUID()
+
+    func shutdownService(completion: @escaping (Bool) -> Void) {
+        guard !stopping else { return }
+        guard ready, !starting, !pending else {
+            message = "프록시 연결 상태를 확인한 뒤 다시 종료하세요."
+            completion(false); return
+        }
+        stopping = true; shutdownAccepted = false
+        shutdownCompletion = completion
+        let id = UUID(); shutdownID = id
+        guard send(["action": "shutdown", "new_session": false]) else {
+            finishShutdown(false); return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, self.stopping, self.shutdownID == id else { return }
+            self.message = "프록시 종료를 확인하지 못했습니다. 연결 상태를 확인하세요."
+            self.finishShutdown(false)
+        }
+    }
+
+    private func finishShutdown(_ success: Bool) {
+        let completion = shutdownCompletion
+        shutdownCompletion = nil; stopping = false; shutdownAccepted = false
+        completion?(success)
+    }
+
     func start(helper: URL) {
         // A stale busy observation must not prevent reconnecting a dead relay.
         // Detaching the relay never cancels a live daemon/model request.
-        guard !(ready && busy) && !starting else { return }
+        guard !stopping && !(ready && busy) && !starting else { return }
         stop()
         let run = UUID(); generation = run
         let process = Process(), source = Pipe(), sink = Pipe()
@@ -89,6 +120,14 @@ final class DirectProxyStore: ObservableObject {
             var request_id: UInt64?; var status: String?; var succeeded: Bool?
         }
         guard let e = try? JSONDecoder().decode(Event.self, from: data) else { return }
+        if e.event == "probe_shutdown", stopping {
+            if e.accepted == true { shutdownAccepted = true }
+            else {
+                message = "Codex 요청이나 도구가 실행 중입니다. 모든 작업을 마친 뒤 다시 종료하세요."
+                finishShutdown(false)
+            }
+            return
+        }
         if e.event == "usage_refresh" {
             guard usageRefreshing, e.request_id == usageSequence else { return }
             switch e.status {
@@ -137,7 +176,7 @@ final class DirectProxyStore: ObservableObject {
     }
 
     func poll() {
-        guard child != nil, !starting else { return }
+        guard child != nil, !starting, !stopping else { return }
         if Date().timeIntervalSince(lastRead) > 4 {
             ready = false; message = "프록시 상태 미확인 · 전환 차단"
             if usageRefreshing { finishUsageRead("프록시 연결 미확인 · 사용량 조회 실패") }
@@ -231,7 +270,10 @@ final class DirectProxyStore: ObservableObject {
 
     private func ended(run: UUID) {
         guard generation == run else { return }
-        stop(); message = "프록시 제어 연결 종료 · 다시 연결해 상태 확인"
+        let stopped = stopping && shutdownAccepted
+        stop()
+        message = stopped ? "앱과 프록시 종료 준비 완료" : "프록시 제어 연결 종료 · 다시 연결해 상태 확인"
+        if stopping { finishShutdown(stopped) }
     }
 
     func stop() {

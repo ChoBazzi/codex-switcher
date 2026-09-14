@@ -16,6 +16,12 @@ struct DirectProxyCheck {
             state("probe_state")
             while let line = readLine(), let data = line.data(using: .utf8),
                   let command = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if command["action"] as? String == "shutdown" {
+                    precondition(command["new_session"] as? Bool == false)
+                    state("probe_shutdown", !toolWaiting)
+                    if !toolWaiting { return }
+                    continue
+                }
                 if command["action"] as? String == "status" { state("probe_state"); continue }
                 if command["action"] as? String == "recover" {
                     let accepted = failed && !toolWaiting && command["revision"] as? Int == revision
@@ -157,6 +163,10 @@ struct DirectProxyCheck {
         precondition(!store.canSelect("f"))
         try await waitFor { store.canAbandonTurn }
         precondition(store.busy && !store.canSelect("a"))
+        var rejectedShutdown: Bool?
+        store.shutdownService { rejectedShutdown = $0 }
+        try await waitFor { rejectedShutdown != nil }
+        precondition(rejectedShutdown == false && store.ready && store.busy)
         store.abandonTurn()
         precondition(store.pending && !store.canAbandonTurn)
         try await waitFor { !store.pending }
@@ -171,6 +181,14 @@ struct DirectProxyCheck {
         try await waitFor { store.ready }
         precondition(!store.busy)
         store.poll()
+        var acceptedShutdown: Bool?
+        store.shutdownService { acceptedShutdown = $0 }
+        try await waitFor { acceptedShutdown != nil }
+        precondition(acceptedShutdown == true && !store.stopping && !store.ready)
+        var disconnectedShutdown: Bool?
+        store.shutdownService { disconnectedShutdown = $0 }
+        precondition(disconnectedShutdown == false)
+        print("PASS: shutdown rejects active tools, waits for ACK and disconnect, preserves session and rejects unknown state")
         store.stop()
         try await Task.sleep(nanoseconds: 100_000_000)
         precondition(!store.ready && store.home == nil && !store.canSelect("a"))

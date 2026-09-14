@@ -524,6 +524,11 @@ X-Switcher-Run = %q
 		id, root, identityErr := cliidentity.Conversation(r.Header)
 		if *toolsMode && identityErr == nil && id != root {
 			mu.Lock()
+			if closing {
+				mu.Unlock()
+				http.Error(w, "proxy_service_stopping", 503)
+				return
+			}
 			if session != "" && root != session {
 				mu.Unlock()
 				http.Error(w, "probe_conversation_changed", 409)
@@ -571,6 +576,11 @@ X-Switcher-Run = %q
 		}
 		id, err := cliidentity.ThreadID(r.Header)
 		mu.Lock()
+		if closing {
+			mu.Unlock()
+			http.Error(w, "proxy_service_stopping", 503)
+			return
+		}
 		waited := false
 		if *toolsMode && err == nil && id == session && busy && terminalReady && !waiting {
 			waiting = true
@@ -874,6 +884,9 @@ X-Switcher-Run = %q
 					ok := !busy && !waiting && !turnPending && !auxActive()
 					if ok && command.NewSession {
 						checkpointRetired = true
+					}
+					if ok {
+						closing = true
 					}
 					state("probe_shutdown", ok)
 					if ok {

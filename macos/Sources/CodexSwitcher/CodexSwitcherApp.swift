@@ -30,6 +30,7 @@ final class MenuStore: ObservableObject {
         let args = ProcessInfo.processInfo.arguments
         demo = args.contains("--demo")
         externalStatus = args.contains("--external-status")
+        SwitcherAppDelegate.currentStore = self
         if !demo && externalStatus { sessionBridge = SessionBridge(environment: ProcessInfo.processInfo.environment) }
         if !demo, let index = args.firstIndex(of: "--helper"), args.indices.contains(index + 1) {
             helper = URL(fileURLWithPath: args[index + 1])
@@ -207,14 +208,53 @@ final class MenuStore: ObservableObject {
     }
 }
 
+@MainActor
+final class SwitcherAppDelegate: NSObject, NSApplicationDelegate {
+    weak var store: MenuStore?
+    static weak var currentStore: MenuStore?
+    private var terminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store = store ?? Self.currentStore else { return .terminateCancel }
+        if store.demo { return .terminateNow }
+        if terminating { return .terminateLater }
+        if store.login.busy {
+            showTerminationMessage("계정 로그인·로그아웃 작업을 마친 뒤 종료하세요.")
+            return .terminateCancel
+        }
+        terminating = true
+        // Return terminateLater before completing even an immediate rejection.
+        Task { @MainActor in
+            store.direct.shutdownService { [weak self] success in
+                guard let self else { return }
+                self.terminating = false
+                if !success { self.showTerminationMessage(store.direct.message) }
+                sender.reply(toApplicationShouldTerminate: success)
+            }
+        }
+        return .terminateLater
+    }
+
+    private func showTerminationMessage(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "앱과 프록시를 종료하지 못했습니다"
+        alert.informativeText = message
+        alert.addButton(withTitle: "확인")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+}
+
 #if !MENU_LAYOUT_CHECK
 @main
 struct CodexSwitcherApp: App {
+    @NSApplicationDelegateAdaptor(SwitcherAppDelegate.self) private var appDelegate
     @StateObject private var store = MenuStore()
 
     var body: some Scene {
         MenuBarExtra(store.menuLabel, systemImage: "arrow.triangle.swap") {
             MenuPanel(store: store)
+                .onAppear { appDelegate.store = store }
         }
         .menuBarExtraStyle(.window)
     }
@@ -368,7 +408,7 @@ struct MenuPanel: View {
                 Button { store.refresh() } label: { Label("새로고침", systemImage: "arrow.clockwise") }
                     .help("프록시가 실제 사용량을 조회합니다. 중복 조회를 막고 완료 후 60초 뒤 자동 조회합니다. 연속 조회는 5초 간격으로 제한합니다.")
                     .disabled(store.demo || !direct.canReadUsage || login.busy || store.helper == nil)
-                Button("종료") { NSApplication.shared.terminate(nil) }.disabled(login.busy)
+                Button(direct.stopping ? "프록시 종료 중…" : "앱·프록시 종료") { NSApplication.shared.terminate(nil) }.disabled(direct.stopping)
             }
         }
         .padding(18)
