@@ -29,3 +29,7 @@ CLI 0.154.0의 리뷰·서브에이전트·자동 승인 요청은 Thread-Id와 
 `TestAuxiliaryFailureIsolationAndAccountPinning`, `TestAuxiliaryCheckpointFailurePreventsDispatch`, `TestAuxiliaryBindingSurvivesServiceRestart`: 실패 재전송 차단, 형제 격리, 계정 고정, checkpoint 오류 시 전송 없음, 인증/부모 관계 거절, 재시작 후 보조 재전송 거절과 새 보조 요청 허용을 검사한다. 전체 검사는 `sh macos/Checks/verify.sh`다.
 
 새 helper를 빌드한 뒤 모든 CLI/보조 작업이 끝났을 때 앱 종료 → `switcher-helper proxy-stop` → 앱 재실행으로 적용한다. 실행 중인 기존 daemon은 빌드만으로 교체되지 않는다. 최초 적용 전 이미 차단된 리뷰/서브에이전트는 사용자가 새로 시작한다. 실제 계정 자동 검토의 승인 판단 품질과 모든 TUI 기능을 검증했다는 뜻은 아니다.
+
+## 실사용 재발 진단
+
+새 helper 적용 후에도 같은 상위 identity 오류가 보고되어, 인증된 요청의 오류 본문에 고정 진단 분류를 추가한다. thread/session 누락·중복·UUID 형식 오류·정상 불일치, 그리고 tools 비활성 경로를 구분한다. 실제 헤더 값·대화 ID·인증은 출력하지 않으며 수락 조건은 변경하지 않는다. 과거 이벤트는 보관되지 않아 소급 진단할 수 없다. CLI 0.154.0의 임시 홈 TUI `/review`에서도 각각 한 개의 서로 다른 정상 UUID를 확인했지만, 사용자의 실패 요청 자체를 재현한 것으로 간주하지 않는다.

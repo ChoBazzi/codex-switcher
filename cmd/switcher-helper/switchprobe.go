@@ -614,7 +614,14 @@ X-Switcher-Run = %q
 		}
 		if code := probeAdmissionCode(err, busy, failed || checkpointErr != nil, session, id); code != "" {
 			mu.Unlock()
-			http.Error(w, code, 409)
+			responseCode := code
+			if code == "probe_identity_invalid" {
+				responseCode += ": " + cliidentity.Diagnostic(r.Header)
+				if !*toolsMode {
+					responseCode += ": auxiliary_disabled"
+				}
+			}
+			http.Error(w, responseCode, 409)
 			report(map[string]any{"event": "probe_blocked", "code": code,
 				"thread_header_count":    len(r.Header.Values("Thread-Id")),
 				"session_header_count":   len(r.Header.Values("Session-Id")),

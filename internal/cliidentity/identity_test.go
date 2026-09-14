@@ -63,3 +63,24 @@ func TestConversationIndependentIdentifiers(t *testing.T) {
 		t.Fatal("duplicate accepted")
 	}
 }
+
+func TestDiagnosticNeverReturnsHeaderValues(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	for _, tc := range []struct {
+		threads, sessions []string
+		want              string
+	}{
+		{nil, nil, "thread_missing"},
+		{[]string{id, id}, []string{id}, "thread_repeated"},
+		{[]string{id}, nil, "session_missing"},
+		{[]string{id}, []string{id, id}, "session_repeated"},
+		{[]string{"synthetic-private-value"}, []string{id}, "thread_format_invalid"},
+		{[]string{id}, []string{"synthetic-private-value"}, "session_format_invalid"},
+		{[]string{id}, []string{"22222222-2222-4222-8222-222222222222"}, "distinct_valid_identifiers"},
+		{[]string{id}, []string{id}, "matching_valid_identifiers"},
+	} {
+		if got := Diagnostic(http.Header{"Thread-Id": tc.threads, "Session-Id": tc.sessions}); got != tc.want {
+			t.Fatal("incorrect fixed diagnostic category")
+		}
+	}
+}

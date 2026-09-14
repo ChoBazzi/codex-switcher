@@ -44,3 +44,26 @@ func Conversation(header http.Header) (thread, root string, err error) {
 	}
 	return threads[0], sessions[0], nil
 }
+
+// Diagnostic returns only fixed categories, never header values or identifiers.
+func Diagnostic(header http.Header) string {
+	threads, sessions := header.Values("Thread-Id"), header.Values("Session-Id")
+	switch {
+	case len(threads) == 0:
+		return "thread_missing"
+	case len(threads) != 1:
+		return "thread_repeated"
+	case len(sessions) == 0:
+		return "session_missing"
+	case len(sessions) != 1:
+		return "session_repeated"
+	case !uuid(threads[0]):
+		return "thread_format_invalid"
+	case !uuid(sessions[0]):
+		return "session_format_invalid"
+	case threads[0] != sessions[0]:
+		return "distinct_valid_identifiers"
+	default:
+		return "matching_valid_identifiers"
+	}
+}
