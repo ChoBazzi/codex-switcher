@@ -92,7 +92,7 @@ func probeToolBodyWithCompaction(body []byte, slot, previousSlot, salt string, a
 				item["call_id"] = probePortableCall(salt, slot, call)
 			}
 		case "function_call_output", "custom_tool_call_output":
-			if !probeKeys(item, "type id status call_id output") || !probeCompleted(item) || !probeTextOutput(item["output"]) {
+			if !probeKeys(item, "type id status call_id output") || !probeCompleted(item) || !probeToolOutput(item["output"]) {
 				return bad("tool_output_invalid", i)
 			}
 			call := probeString(item, "call_id")
@@ -173,7 +173,7 @@ func probePortableCall(salt, slot, call string) json.RawMessage {
 	b, _ := json.Marshal("call_" + hex.EncodeToString(digest[:16]))
 	return b
 }
-func probeTextOutput(raw json.RawMessage) bool {
+func probeToolOutput(raw json.RawMessage) bool {
 	if len(raw) > 0 && raw[0] == '"' {
 		var s string
 		return json.Unmarshal(raw, &s) == nil
@@ -183,6 +183,12 @@ func probeTextOutput(raw json.RawMessage) bool {
 		return false
 	}
 	for _, p := range parts {
+		if probeString(p, "type") == "input_image" {
+			if !probeInlineToolImage(p) {
+				return false
+			}
+			continue
+		}
 		if !probeKeys(p, "type text") || (probeString(p, "type") != "input_text" && probeString(p, "type") != "output_text") || !probeHasString(p, "text") {
 			return false
 		}
