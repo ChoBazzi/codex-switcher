@@ -1,7 +1,130 @@
 import Foundation
+import Darwin
 
 @main
 struct DirectProxyCheck {
+    private static let brokenRelayDirectoryKey = "SWITCHER_CHECK_BROKEN_RELAY_DIRECTORY"
+
+    private static func trace(_ event: String, directory: URL) throws {
+        let url = directory.appendingPathComponent("relay-\(getpid()).log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            precondition(FileManager.default.createFile(atPath: url.path, contents: nil))
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((event + "\n").utf8))
+    }
+
+    @MainActor private static func waitFor(_ condition: () -> Bool) async throws {
+        for _ in 0..<150 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        fatalError("direct proxy check timed out")
+    }
+
+    private static func assertDefaultSIGPIPE() {
+        var disposition = sigaction()
+        precondition(sigaction(SIGPIPE, nil, &disposition) == 0)
+        precondition(unsafeBitCast(disposition.__sigaction_u.__sa_handler, to: UInt.self) == 0,
+                     "relay protection must preserve the process-wide default SIGPIPE disposition")
+    }
+
+    @MainActor private static func checkBrokenRelay(_ action: String, directory: URL) async throws {
+        signal(SIGPIPE, SIG_DFL)
+        assertDefaultSIGPIPE()
+        func logs() -> [String] {
+            let files = try! FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            return files.filter { $0.pathExtension == "log" }.map { try! String(contentsOf: $0, encoding: .utf8) }
+        }
+        let store = DirectProxyStore(usageReadTimeout: 10_000_000_000)
+        var invalidations = 0
+        var shutdownResults: [Bool] = []
+        store.onUsageUnavailable = { invalidations += 1 }
+        let helper = URL(fileURLWithPath: CommandLine.arguments[0])
+        store.start(helper: helper)
+        try await waitFor { store.ready }
+        if action != "refresh" {
+            // Leave a real usage request pending when a different command loses the relay.
+            store.readUsage()
+            try await waitFor { store.usageRefreshMessage == "사용량 조회 중…" && logs().contains { $0.contains("closed\n") } }
+        }
+        let previousInvalidations = invalidations
+        switch action {
+        case "poll":
+            store.busy = true // The last busy observation must be cleared on disconnect.
+            store.poll()
+        case "select": store.select("b")
+        case "refresh": store.readUsage()
+        case "shutdown": store.shutdownService { shutdownResults.append($0) }
+        default: fatalError("unknown broken relay action")
+        }
+        precondition(!store.ready && !store.starting && !store.pending && !store.busy && !store.connected)
+        precondition(store.home == nil && !store.stopping && !store.canReadUsage && !store.usageRefreshing)
+        precondition(store.message.contains("연결 끊김") && invalidations > previousInvalidations)
+        precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        assertDefaultSIGPIPE()
+        store.poll()
+        store.select("b")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        precondition(logs().count == 1, "a failed command must not relaunch its relay")
+        let oldLog = logs()[0]
+        precondition(!oldLog.contains("command:status") && !oldLog.contains("command:select") && !oldLog.contains("command:shutdown"))
+        precondition(oldLog.components(separatedBy: "command:usage_refresh").count - 1 == (action == "refresh" ? 0 : 1))
+
+        // Only an explicit reconnect may start another helper. Its log must contain no replay.
+        try Data().write(to: directory.appendingPathComponent("healthy"))
+        store.start(helper: helper)
+        try await waitFor { store.ready && logs().count == 2 }
+        precondition(store.slot == "a" && !store.busy && !store.pending && !store.usageRefreshing)
+        precondition(logs().first { $0.hasPrefix("healthy\n") } == "healthy\n")
+        let reconnectedInvalidations = invalidations
+        try Data().write(to: directory.appendingPathComponent("release-old-relay"))
+        try await waitFor { logs().contains { $0.contains("released\n") } }
+        // The old helper emits stale state, a shutdown ACK and EOF after the new relay is ready.
+        for _ in 0..<10 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            precondition(store.ready && store.slot == "a" && !store.busy && !store.pending)
+            precondition(invalidations == reconnectedInvalidations)
+            precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        }
+        store.select("b")
+        try await waitFor { store.slot == "b" && !store.pending }
+        var finished: Bool?
+        store.shutdownService { finished = $0 }
+        try await waitFor { finished != nil }
+        precondition(finished == true && !store.ready)
+        precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        assertDefaultSIGPIPE()
+    }
+
+    @MainActor private static func checkBrokenRelaySubprocesses() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("broken-relay-check-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var children: [Process] = []
+        defer { children.filter(\.isRunning).forEach { $0.terminate() } }
+        for action in ["poll", "select", "refresh", "shutdown"] {
+            let fixture = directory.appendingPathComponent(action)
+            try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            process.arguments = ["--broken-relay-check", action]
+            var environment = ProcessInfo.processInfo.environment
+            environment[brokenRelayDirectoryKey] = fixture.path
+            process.environment = environment
+            try process.run()
+            children.append(process)
+        }
+        try await waitFor { children.allSatisfy { !$0.isRunning } }
+        for process in children {
+            precondition(process.terminationReason == .exit && process.terminationStatus == 0,
+                         "broken relay \(process.arguments!.last!) failed: \(process.terminationReason), \(process.terminationStatus)")
+        }
+        print("PASS: broken relay poll/select/refresh/shutdown survive default SIGPIPE, detach without replay, reconnect explicitly and ignore stale EOF")
+    }
+
     @MainActor static func main() async throws {
         if CommandLine.arguments.contains("proxy-connect") {
             func emit(_ value: [String: Any]) {
@@ -12,10 +135,42 @@ struct DirectProxyCheck {
             func state(_ event: String, _ accepted: Bool = false) {
                 emit(["event":event,"slot":slot,"busy":toolWaiting,"failed":failed,"connected":true,"revision":revision,"accepted":accepted,"can_abandon_turn":toolWaiting])
             }
+            let fixture = ProcessInfo.processInfo.environment[brokenRelayDirectoryKey].map { URL(fileURLWithPath: $0) }
+            let broken = fixture.map { !FileManager.default.fileExists(atPath: $0.appendingPathComponent("healthy").path) } ?? false
+            let breaksOnRefresh = broken && fixture!.lastPathComponent != "refresh"
+            if let fixture { try trace(broken ? "broken" : "healthy", directory: fixture) }
+            func closeInput() throws {
+                try FileHandle.standardInput.close()
+                try trace("closed", directory: fixture!)
+            }
+            func holdBrokenRelay() throws {
+                for _ in 0..<250 {
+                    if FileManager.default.fileExists(atPath: fixture!.appendingPathComponent("release-old-relay").path) {
+                        slot = "e"; toolWaiting = true
+                        state("probe_state")
+                        state("probe_shutdown", true)
+                        try FileHandle.standardOutput.close()
+                        try trace("released", directory: fixture!)
+                        return
+                    }
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
+                fatalError("broken relay fixture was not released")
+            }
+            if broken && !breaksOnRefresh { try closeInput() }
             emit(["event":"probe_ready","codex_home":"/private/tmp/synthetic-unused-home"])
             state("probe_state")
+            if broken && !breaksOnRefresh { try holdBrokenRelay(); return }
             while let line = readLine(), let data = line.data(using: .utf8),
                   let command = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let fixture { try trace("command:" + (command["action"] as! String), directory: fixture) }
+                if breaksOnRefresh {
+                    precondition(command["action"] as? String == "usage_refresh")
+                    try closeInput()
+                    emit(["event":"usage_refresh", "request_id":command["request_id"]!, "status":"started"])
+                    try holdBrokenRelay()
+                    return
+                }
                 if command["action"] as? String == "shutdown" {
                     precondition(command["new_session"] as? Bool == false)
                     state("probe_shutdown", !toolWaiting)
@@ -62,12 +217,10 @@ struct DirectProxyCheck {
             }
             return
         }
-        func waitFor(_ condition: () -> Bool) async throws {
-            for _ in 0..<100 {
-                if condition() { return }
-                try await Task.sleep(nanoseconds: 20_000_000)
-            }
-            fatalError("direct proxy check timed out")
+        if CommandLine.arguments.contains("--broken-relay-check") {
+            let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment[brokenRelayDirectoryKey]!)
+            try await checkBrokenRelay(CommandLine.arguments.last!, directory: directory)
+            return
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -197,5 +350,6 @@ struct DirectProxyCheck {
         precondition(!store.usageRefreshing && store.usageRefreshMessage!.contains("연결 후"))
         precondition(unavailableCount >= 2)
         print("PASS: direct proxy selection; remote refresh protocol, duplicate suppression, timeout, old reply isolation, malformed reply, recovery and disconnect (synthetic)")
+        try await checkBrokenRelaySubprocesses()
     }
 }

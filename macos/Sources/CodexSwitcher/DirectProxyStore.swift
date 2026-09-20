@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SwitcherUIModel
 
@@ -83,6 +84,13 @@ final class DirectProxyStore: ObservableObject {
         process.arguments = ["proxy-connect"]
         process.standardInput = source; process.standardOutput = sink
         process.standardError = FileHandle.nullDevice
+        // A relay may exit before its EOF callback reaches the main actor.
+        // Suppress SIGPIPE only on this writer so EPIPE reaches send's catch;
+        // do not change the app's or child processes' global signal handling.
+        guard fcntl(source.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            message = "프록시 제어 연결 준비 실패 · 다시 연결해 주세요"
+            return
+        }
         do { try process.run() } catch { message = "프록시 실행 실패 · helper 확인 필요"; return }
         try? source.fileHandleForReading.close(); try? sink.fileHandleForWriting.close()
         child = process; input = source; starting = true
@@ -204,7 +212,7 @@ final class DirectProxyStore: ObservableObject {
 
     private func control(_ command: [String: Any]) {
         pending = true
-        send(command)
+        guard send(command) else { return }
         let run = generation
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -219,7 +227,14 @@ final class DirectProxyStore: ObservableObject {
     private func send(_ object: [String: Any]) -> Bool {
         guard let handle = input?.fileHandleForWriting, let data = try? JSONSerialization.data(withJSONObject: object) else { return false }
         do { try handle.write(contentsOf: data + Data([10])); return true }
-        catch { ready = false; message = "프록시 제어 연결 끊김"; return false }
+        catch {
+            // Detach only our relay; never stop the daemon or replay the command.
+            // Rotating generation also discards its queued events/timeouts.
+            stop()
+            message = "프록시 제어 연결 끊김 · 다시 연결해 상태 확인"
+            if stopping { finishShutdown(false) }
+            return false
+        }
     }
 
     func readUsage() {
