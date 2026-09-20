@@ -65,6 +65,12 @@ func probeToolBodyWithCompaction(body []byte, slot, previousSlot, salt string, a
 			if !probeMessageText(item["content"]) {
 				return bad("message_content_unsupported", i)
 			}
+		case "agent_message":
+			// CLI-delivered inter-agent text is not a user boundary or a
+			// server continuation. Preserve attribution, never use it to route.
+			if !probeAgentMessage(item) {
+				return bad("agent_message_shape_unsupported", i)
+			}
 		case "additional_tools":
 			if !probeKeys(item, "type role id tools") || !probeToolDefinitions(item["tools"]) {
 				return bad("tool_declaration_unsupported", i)
@@ -208,6 +214,23 @@ func probeMessageText(raw json.RawMessage) bool {
 	}
 	return true
 }
+
+func probeAgentMessage(item map[string]json.RawMessage) bool {
+	if !probeKeys(item, "type id author recipient content") || probeString(item, "author") == "" || probeString(item, "recipient") == "" {
+		return false
+	}
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(item["content"], &parts) != nil || parts == nil {
+		return false
+	}
+	for _, part := range parts {
+		if !probeKeys(part, "type text") || probeString(part, "type") != "input_text" || !probeHasString(part, "text") {
+			return false
+		}
+	}
+	return true
+}
+
 func probeToolDefinitions(raw json.RawMessage) bool {
 	var definitions []map[string]json.RawMessage
 	if json.Unmarshal(raw, &definitions) != nil || definitions == nil {

@@ -2,6 +2,8 @@
 
 **후속 수정:** [ADR 0058](adr/0058-auxiliary-conversation-isolation.md)에서 리뷰·서브에이전트·자동 승인 지원을 추가했다. 아래 표는 수정 전 조사 기록이다. 현재 같은 이름의 통합 검사는 이 세 보조 경로의 통과와 기존 루트 분기 제한을 확인한다.
 
+**2026-09-21 호환성 수정:** CLI 0.155.1의 `agent_message` 입력 이력이 `probe_tool_history_unsupported`로 차단되는 경로를 합성 재개로 재현하고 텍스트 형식 지원을 추가했다. item ID는 제거하고 출처·텍스트를 보존하며 실제 사용자 입력 경계와 계정 격리는 유지한다. [ADR 0043](adr/0043-local-tool-history-switching.md) 및 `TestInstalledProbeToolsAgentMessageHistory` 참조. 로컬 기록의 내부 메타데이터는 CLI가 wire에서 생략하므로 임의 메타데이터 통과는 허용하지 않는다.
+
 검증일: 2026-09-14. 설치 CLI: `codex-cli 0.154.0`, macOS arm64.
 
 ## 확인 결과
