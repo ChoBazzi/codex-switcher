@@ -16,6 +16,7 @@ type probeTurnWriter struct {
 	holdTerminal                      bool
 	frame, held                       []byte
 	onTerminal                        func()
+	reasoning                         map[[32]byte]bool
 }
 
 func (w *probeTurnWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -123,6 +124,13 @@ func (w *probeTurnWriter) item(item map[string]json.RawMessage) {
 			w.final = true
 		}
 	case "reasoning":
+		if w.reasoning == nil {
+			w.reasoning = map[[32]byte]bool{}
+		}
+		w.reasoning[probeReasoningKey(item)] = true
+		if len(w.reasoning) > 1024 {
+			w.invalid = true
+		}
 	default:
 		w.invalid = true
 	}

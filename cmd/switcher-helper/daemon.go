@@ -74,7 +74,14 @@ func proxyConnect(input io.Reader, output io.Writer) error {
 	if err != nil {
 		return errDaemon
 	}
+	return relayProxy(conn, input, output)
+}
+
+func relayProxy(conn net.Conn, input io.Reader, output io.Writer) error {
 	defer conn.Close()
+	if err := json.NewEncoder(output).Encode(map[string]any{"event": "helper_build", "build_id": processBuildID, "protocol_version": controlProtocolVersion}); err != nil {
+		return errDaemon
+	}
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(conn, input); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(output, conn); done <- struct{}{} }()
@@ -94,6 +101,7 @@ type serviceBroker struct {
 	sequence     uint64
 	refreshOwner *servicePeer
 	refreshID    uint64
+	diagnostics  map[string]probeDiagnostic
 }
 
 func (b *serviceBroker) enqueue(p *servicePeer, data []byte) {
@@ -115,6 +123,22 @@ func (b *serviceBroker) Write(data []byte) (int, error) {
 	_ = json.Unmarshal(event["event"], &kind)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if d := sanitizedProbeDiagnostic(data); d != nil {
+		if b.diagnostics == nil {
+			b.diagnostics = map[string]probeDiagnostic{}
+		}
+		// Follow-on failure gates must not hide the original cause.
+		if _, exists := b.diagnostics[d.Scope]; exists && (d.Code == "previous_request_failed" || d.Code == "new_input_required") {
+			return len(data), nil
+		}
+		b.diagnostics[d.Scope] = *d
+		encoded, _ := json.Marshal(d)
+		b.cache["diagnostic_"+d.Scope] = append(encoded, '\n')
+		if b.peer != nil {
+			b.enqueue(b.peer, append(encoded, '\n'))
+		}
+		return len(data), nil
+	}
 	if kind == "probe_shutdown" {
 		// Idle-only shutdown ACK must reach its requester before the service exits.
 		if b.peer != nil {
@@ -147,7 +171,7 @@ func (b *serviceBroker) Write(data []byte) (int, error) {
 		b.enqueue(b.peer, append(encoded, '\n'))
 		return len(data), nil
 	}
-	// Request diagnostics are deliberately not retained or sent to the app.
+	// Raw diagnostics are never retained; only the explicit summary above is.
 	if b.peer != nil && (kind == "probe_ready" || kind == "probe_state" || kind == "probe_selection" || kind == "probe_abandonment" || kind == "usage_snapshot") {
 		b.enqueue(b.peer, data)
 	}
@@ -163,7 +187,7 @@ func (b *serviceBroker) attach(conn net.Conn) {
 		return
 	}
 	b.peer = p
-	for _, key := range []string{"probe_ready", "usage_snapshot", "probe_state"} {
+	for _, key := range []string{"probe_ready", "usage_snapshot", "probe_state", "diagnostic_root", "diagnostic_auxiliary"} {
 		if data := b.cache[key]; data != nil {
 			b.enqueue(p, data)
 		}

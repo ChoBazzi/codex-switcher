@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -25,9 +26,17 @@ type probeAuxiliary struct {
 	done                  chan struct{}
 	credential            [32]byte
 	lastBody              [32]byte
+	reasoning             probeReasoningOwners
+	report                func(any)
 }
 
 func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.Mutex, access probeAccess, upstream, salt string, changed func() bool, begin func() error) {
+	reject := func(code string, status int) {
+		if a.report != nil {
+			a.report(map[string]any{"event": "probe_auxiliary_finished", "code": code, "last_http_status": status})
+		}
+		http.Error(w, code, status)
+	}
 	waited := false
 	mu.Lock()
 	if a.busy && a.finishing {
@@ -39,7 +48,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		case <-r.Context().Done():
 			return
 		case <-time.After(30 * time.Second):
-			http.Error(w, "probe_request_wait_timeout", 409)
+			reject("probe_request_wait_timeout", 409)
 			return
 		}
 		mu.Lock()
@@ -50,18 +59,18 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 			code = "probe_request_in_progress"
 		}
 		mu.Unlock()
-		http.Error(w, code, 409)
+		reject(code, 409)
 		return
 	}
 	if r.URL.Path != "/responses" {
 		mu.Unlock()
-		http.Error(w, "probe_auxiliary_compaction_unsupported", 409)
+		reject("probe_auxiliary_compaction_unsupported", 409)
 		return
 	}
 	if begin != nil {
 		if err := begin(); err != nil {
 			mu.Unlock()
-			http.Error(w, "account_operation_busy", 409)
+			reject("account_operation_busy", 409)
 			return
 		}
 	}
@@ -73,7 +82,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		close(a.done)
 
 		mu.Unlock()
-		http.Error(w, "proxy_checkpoint_unavailable", 503)
+		reject("proxy_checkpoint_unavailable", 503)
 		return
 	}
 	mu.Unlock()
@@ -94,7 +103,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
 	r.Body.Close()
 	if err != nil {
-		http.Error(w, "probe_tool_history_unsupported", 409)
+		reject("probe_tool_history_unsupported", 409)
 		return
 	}
 	hash := sha256.Sum256(body)
@@ -106,7 +115,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	mu.Unlock()
 	if duplicate {
 		success = true
-		http.Error(w, "probe_duplicate_followup", 409)
+		reject("probe_duplicate_followup", 409)
 		return
 	}
 	// A new branch may contain parent reasoning; reject it unless this handler has
@@ -117,8 +126,24 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		previous = a.binding.Slot
 	}
 	mu.Unlock()
-	body, err = probeToolBody(body, a.binding.Slot, previous, salt+":"+a.binding.Thread)
+	boundary, _ := probeUserBoundary(body)
+	body, err = probeToolBodyWithOwnership(body, a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return a.reasoning.permits(item, a.credential)
+	})
 	if err != nil {
+		detail := ""
+		var parsed *probeBodyError
+		if errors.As(err, &parsed) {
+			detail = parsed.Reason
+		}
+		if a.report != nil {
+			a.report(struct {
+				Event string `json:"event"`
+				proxy.Diagnostics
+			}{"probe_auxiliary_finished", proxy.Diagnostics{Status: 409, Rejection: "probe_tool_history_unsupported", RejectionDetail: detail}})
+		}
 		http.Error(w, "probe_tool_history_unsupported", 409)
 		return
 	}
@@ -127,13 +152,13 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		a.handler, err = proxy.New(upstream, func(_ *http.Request) (proxy.Identity, error) {
 			c, e := usage.RequestAccess(access, a.binding.Slot, time.Now())
 			if e != nil {
-				return proxy.Identity{}, e
+				return proxy.Identity{}, probeAccessError(e)
 			}
-			hash := sha256.Sum256([]byte(c.Token))
+			hash := c.HistoryCredential()
 			mu.Lock()
 			defer mu.Unlock()
-			if a.credential != ([32]byte{}) && a.credential != hash {
-				return proxy.Identity{}, errors.New("auxiliary_credential_changed")
+			if hash == ([32]byte{}) || a.credential != ([32]byte{}) && a.credential != hash {
+				return proxy.Identity{}, proxy.ErrAuxiliaryCredential
 			}
 			a.credential = hash
 			return proxy.Identity{Session: a.binding.Thread, Token: c.Token, AccountID: c.AccountID}, nil
@@ -142,7 +167,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	h := a.handler
 	mu.Unlock()
 	if err != nil {
-		http.Error(w, "probe_auxiliary_unavailable", 503)
+		reject("probe_auxiliary_unavailable", 503)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -152,12 +177,25 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	d := h.Diagnostics()
 	success = d.Status == 200 && d.ResponseFailure == "" && d.Rejection == "" && turn.valid()
 	mu.Lock()
+	if success && !a.reasoning.accept(turn.reasoning, a.credential, boundary) {
+		success = false
+	}
 	a.pending = success && turn.pending()
 	a.finishing = success
 	mu.Unlock()
 	if success {
 		if turn.release() != nil {
 			success = false
+			d.ResponseFailure = "probe_client_write_failed"
 		}
+	}
+	if !success && a.report != nil {
+		if d.Status == 200 && d.ResponseFailure == "" && d.Rejection == "" {
+			d.ResponseFailure = "probe_tool_response_unsupported"
+		}
+		a.report(struct {
+			Event string `json:"event"`
+			proxy.Diagnostics
+		}{"probe_auxiliary_finished", d})
 	}
 }

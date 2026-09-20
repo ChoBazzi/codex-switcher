@@ -15,7 +15,7 @@ import (
 type syntheticProbeAccess struct{}
 
 func (syntheticProbeAccess) Access(slot string, now time.Time) (accounts.Access, error) {
-	return accounts.Access{Token: "synthetic-" + slot, AccountID: "synthetic-" + slot, ExpiresAt: now.Add(time.Hour)}, nil
+	return accounts.Access{Token: "synthetic-" + slot, AccountID: "synthetic-" + slot, UserID: "synthetic-user-" + slot, Registration: "synthetic-registration-" + slot, ExpiresAt: now.Add(time.Hour)}, nil
 }
 
 func TestProbeManagedSelection(t *testing.T) {

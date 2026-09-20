@@ -3,6 +3,8 @@
 - 상태: accepted (실험 기능·합성 검증, 실계정 개발 작업 검증 대기)
 - 관련: ADR 0040, 0042
 
+2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
+
 ## 결정
 
 후속 [ADR 0049](0049-compaction-and-account-ownership.md)에서 CLI 텍스트 압축 후 전환을 검증하고 native 암호화 압축은 생성 계정에서만 처리하도록 추가했다. 아래 압축 미지원 설명은 당시 구현 범위다.

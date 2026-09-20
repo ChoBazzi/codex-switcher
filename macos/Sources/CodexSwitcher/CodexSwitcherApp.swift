@@ -265,6 +265,7 @@ struct MenuPanel: View {
     @State private var logoutConfirmation = LogoutConfirmation()
     @StateObject private var codexSettings = CodexSettingsStore()
     @State private var showingCodexSettings = false
+    @State private var showingDiagnostics = false
     @ObservedObject var store: MenuStore
     @ObservedObject var login: AccountLoginStore
     @ObservedObject var direct: DirectProxyStore
@@ -281,6 +282,8 @@ struct MenuPanel: View {
             CodexSettingsPanel(settings: codexSettings, direct: direct) {
                 showingCodexSettings = false
             }
+        } else if showingDiagnostics {
+            ProxyDiagnosticsPanel(direct: direct) { showingDiagnostics = false }
         } else {
             accountPanel
         }
@@ -375,9 +378,17 @@ struct MenuPanel: View {
                 }
                 HStack {
                     Button("Codex 설정") { showingCodexSettings = true }
+                    Button("상태·진단") { showingDiagnostics = true }
                     Button(direct.connected ? "대화 재개 명령 복사" : "Codex CLI 연결 명령 복사") {
                         direct.copyCommand(resume: direct.connected)
                     }.disabled(!direct.ready)
+                }
+                if direct.buildWarning != nil {
+                    Label("프록시 빌드 확인 필요 · 상태·진단에서 확인하세요", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if !direct.diagnostics.isEmpty {
+                    Text("최근 요청 오류가 있습니다 · 상태·진단에서 원인과 해결 방법을 확인하세요")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if !direct.ready || direct.failed {
                     Button(direct.starting ? "프록시 시작 중…" : (direct.ready && direct.failed ? "사용 가능한 계정으로 복구 준비" : "모델 프록시 다시 연결")) {
@@ -638,5 +649,51 @@ struct CodexSettingsPanel: View {
         .onChange(of: direct.home) { home in
             if !settings.dirty { settings.load(home: home) }
         }
+    }
+}
+
+struct ProxyDiagnosticsPanel: View {
+    @ObservedObject var direct: DirectProxyStore
+    var back: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button("계정 목록으로", action: back)
+                Spacer()
+                Text("상태·진단").font(.headline)
+                Spacer()
+                Button("진단 복사") { direct.copyDiagnostics() }
+            }
+            Text(direct.ready ? (direct.busy ? "프록시 연결됨 · 작업 중" : "프록시 연결됨") : "프록시 연결 미확인")
+            Text("앱: \(direct.appVersion)")
+            Text("연결 시 helper: \(direct.helperBuild.map { String($0.prefix(12)) } ?? "미확인")")
+            Text("실행 프록시: \(direct.proxyBuild.map { String($0.prefix(12)) } ?? "미확인")")
+            if let warning = direct.buildWarning {
+                Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            } else if direct.ready {
+                Text("연결 시 helper와 실행 프록시의 빌드가 일치합니다.").foregroundStyle(.secondary)
+            }
+            Text("빌드 정보는 연결 시 확인합니다. 재빌드 후에는 다시 연결해 확인하세요.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text(direct.diagnosticsFromPreviousConnection ? "마지막 오류 · 이전 연결 기록" : "마지막 오류 · 대화별 최근 1건").font(.headline)
+            if direct.diagnostics.isEmpty {
+                Text("수집된 오류가 없습니다. 구버전 프록시나 재시작 전의 오류는 표시되지 않을 수 있습니다.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(direct.diagnostics) { diagnostic in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(diagnostic.scopeLabel) · \(diagnostic.title)").fontWeight(.medium)
+                    Text(diagnostic.guidance)
+                    Text("\(diagnostic.code) · \(diagnostic.at)").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Text("오류 기록은 현재 작업의 실패 여부와 별개입니다. 진단 복사에는 토큰·계정 식별자·로컬 경로·대화 내용이 포함되지 않습니다.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(18)
+        .frame(width: 620)
     }
 }

@@ -4,6 +4,8 @@
 - 날짜: 2026-09-11
 - 관련: ADR 0001, 0013, 0049, 0054
 
+2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
+
 ## 결정
 
 앱 프록시의 사용량 조회와 실제 모델 dispatch에서 `RequestAccess`를 사용한다. 만료까지 2분 이하이면 helper가 OAuth refresh exchange를 한 번 수행한다. `Access`, `Status`, 계정 선택 및 등록 상태 확인은 로컬 읽기로 유지한다. 별도 `usage`/legacy `exec` 명령에는 갱신 권한을 추가하지 않는다.

@@ -120,14 +120,11 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if i < 0 {
 		return Access{}, ErrNotRegistered
 	}
-	asAccess := func(c Credentials) Access {
-		return Access{Token: c.AccessToken, AccountID: c.AccountID, ExpiresAt: c.ExpiresAt}
-	}
 	if r.Accounts[i].RefreshBlocked {
 		return Access{}, ErrRefresh
 	}
 	if r.Accounts[i].Credentials.ExpiresAt.After(now.Add(2 * time.Minute)) {
-		return asAccess(r.Accounts[i].Credentials), nil
+		return r.Accounts[i].access(), nil
 	}
 	if m.refresher == nil || m.tempParent == "" {
 		return Access{}, ErrExpired
@@ -152,7 +149,7 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	}
 	old := r.Accounts[i].Credentials
 	if old.ExpiresAt.After(now.Add(2 * time.Minute)) {
-		return asAccess(old), nil
+		return r.Accounts[i].access(), nil
 	}
 	save := func() error {
 		data, e := json.Marshal(r)
@@ -191,7 +188,7 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if err = save(); err != nil {
 		return Access{}, err
 	}
-	return asAccess(next), nil
+	return r.Accounts[i].access(), nil
 }
 
 // RoundTripper may close a request asynchronously after Do returns. Coordinate

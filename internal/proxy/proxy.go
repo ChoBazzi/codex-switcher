@@ -53,6 +53,7 @@ type Diagnostics struct {
 	Attempts            int    `json:"upstream_attempts"`
 	Status              int    `json:"last_http_status"`
 	Rejection           string `json:"local_rejection_code"`
+	RejectionDetail     string `json:"local_rejection_detail,omitempty"`
 	ResponseFailure     string `json:"response_failure_code"`
 	ResponseFormat      string `json:"response_format"`
 	CompletionRejection string `json:"completion_rejection_code"`
@@ -207,7 +208,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, err := h.resolve(r)
 	if err != nil || identity.Session == "" || identity.Token == "" {
-		h.reject(w, 401, "session_unavailable")
+		status, code := identityRejection(err)
+		h.reject(w, status, code)
 		return
 	}
 	if !h.begin(identity.Session) {

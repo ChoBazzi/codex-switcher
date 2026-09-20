@@ -14,7 +14,31 @@ func probeToolBody(body []byte, slot, previousSlot, salt string) ([]byte, error)
 	return probeToolBodyWithCompaction(body, slot, previousSlot, salt, nil)
 }
 
+// Called only on a normalized, validated body. These items retain opaque state
+// or original call IDs and require another ownership check at actual dispatch,
+// since RequestAccess may refresh credentials after local body validation.
+func probeNeedsTurnOwner(body []byte) bool {
+	var p struct{ Input []map[string]json.RawMessage }
+	_ = json.Unmarshal(body, &p)
+	needsOwner := false
+	for _, item := range p.Input {
+		kind := probeString(item, "type")
+		if (kind == "message" || kind == "") && probeString(item, "role") == "user" {
+			needsOwner = false
+		}
+		switch kind {
+		case "reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
+			needsOwner = true
+		}
+	}
+	return needsOwner
+}
+
 func probeToolBodyWithCompaction(body []byte, slot, previousSlot, salt string, allow func(map[string]json.RawMessage) bool) ([]byte, error) {
+	return probeToolBodyWithOwnership(body, slot, previousSlot, salt, allow, nil)
+}
+
+func probeToolBodyWithOwnership(body []byte, slot, previousSlot, salt string, allow, reasoning func(map[string]json.RawMessage) bool) ([]byte, error) {
 	bad := func(reason string, i int) ([]byte, error) {
 		return nil, &probeBodyError{Reason: reason, Item: i, Part: -1}
 	}
@@ -118,6 +142,9 @@ func probeToolBodyWithCompaction(body []byte, slot, previousSlot, salt string, a
 				continue
 			} // Completed earlier turn; never export opaque state.
 			if previousSlot == "" || previousSlot != slot {
+				return bad("reasoning_owner_unavailable", i)
+			}
+			if reasoning != nil && !reasoning(item) {
 				return bad("reasoning_owner_unavailable", i)
 			}
 			// Current-turn reasoning is returned untouched to its originating account.

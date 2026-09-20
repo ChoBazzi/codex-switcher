@@ -27,6 +27,7 @@ type probeCheckpoint struct {
 	Session, Slot, PreviousSlot                         string
 	Chosen, Busy, Failed, TurnPending, RecoveryRequired bool
 	LastBody, LastUser                                  [32]byte
+	PreviousCredential                                  [32]byte
 	Revision                                            uint64
 	OpaqueSlot                                          string
 	Owners                                              []probeCheckpointOwner

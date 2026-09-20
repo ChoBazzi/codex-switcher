@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -209,12 +210,14 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	slot, session := "a", ""
 	busy, failed := false, false
 	turnPending, previousSlot := false, ""
+	var previousCredential, activeTurnOwner [32]byte
 	var requestDone chan struct{}
 	terminalReady, waiting := false, false
 	var lastBodyHash [32]byte
 	var lastUserBoundary [32]byte
 	recoveryRequired := false
 	compactOwners := probeCompactRegistry{}
+	var reasoningOwners probeReasoningOwners
 	var activeCompactItems []map[string]json.RawMessage
 	var activeCredential [32]byte
 	opaqueSlot := ""
@@ -273,6 +276,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	var revision uint64
 	if saved != nil {
 		slot, session, previousSlot = saved.Slot, saved.Session, saved.PreviousSlot
+		previousCredential = saved.PreviousCredential
 		for _, binding := range saved.Auxiliary {
 			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true}
 		}
@@ -297,7 +301,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		c := &probeCheckpoint{Retired: checkpointRetired, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
 			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
 			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
-			LastBody: lastBodyHash, LastUser: lastUserBoundary, Revision: revision, OpaqueSlot: opaqueSlot}
+			LastBody: lastBodyHash, LastUser: lastUserBoundary, PreviousCredential: previousCredential, Revision: revision, OpaqueSlot: opaqueSlot}
 		for _, a := range auxiliary {
 			c.Auxiliary = append(c.Auxiliary, a.binding)
 		}
@@ -319,6 +323,9 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	}
 	var outMu sync.Mutex
 	report := func(v any) { outMu.Lock(); defer outMu.Unlock(); _ = json.NewEncoder(output).Encode(v) }
+	for _, a := range auxiliary {
+		a.report = report
+	}
 	refreshEvent := func(id uint64, status string, succeeded bool) {
 		report(map[string]any{"event": "usage_refresh", "request_id": id, "status": status, "succeeded": succeeded})
 	}
@@ -410,10 +417,16 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		mu.Lock()
 		defer mu.Unlock()
 		c, err := usage.RequestAccess(access, slot, time.Now())
-		activeCredential = sha256.Sum256([]byte(c.Token))
+		if err != nil {
+			return proxy.Identity{}, probeAccessError(err)
+		}
+		activeCredential = c.HistoryCredential()
+		if activeTurnOwner != ([32]byte{}) && activeCredential != activeTurnOwner {
+			return proxy.Identity{}, proxy.ErrHistoryOwner
+		}
 		for _, item := range activeCompactItems {
 			if !compactOwners.permits(item, slot, activeCredential) {
-				return proxy.Identity{}, errors.New("compaction_owner_unavailable")
+				return proxy.Identity{}, proxy.ErrCompactionOwner
 			}
 		}
 		return proxy.Identity{Session: session, Token: c.Token, AccountID: c.AccountID}, err
@@ -423,6 +436,17 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		defer mu.Unlock()
 		if err := compactOwners.accept(body, slot, activeCredential); err != nil {
 			return err
+		}
+		var window struct{ Output []map[string]json.RawMessage }
+		_ = json.Unmarshal(body, &window)
+		keys := map[[32]byte]bool{}
+		for _, item := range window.Output {
+			if probeString(item, "type") == "reasoning" {
+				keys[probeReasoningKey(item)] = true
+			}
+		}
+		if !reasoningOwners.accept(keys, activeCredential, lastUserBoundary) {
+			return errors.New("reasoning_owner_unavailable")
 		}
 		opaqueSlot = slot
 		if !persist() {
@@ -531,6 +555,7 @@ X-Switcher-Run = %q
 			}
 			if session != "" && root != session {
 				mu.Unlock()
+				report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": "probe_conversation_changed"})
 				http.Error(w, "probe_conversation_changed", 409)
 				return
 			}
@@ -538,6 +563,7 @@ X-Switcher-Run = %q
 			if a == nil {
 				if failed || checkpointErr != nil || len(auxiliary) >= 128 {
 					mu.Unlock()
+					report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": "probe_auxiliary_unavailable"})
 					http.Error(w, "probe_auxiliary_unavailable", 409)
 					return
 				}
@@ -545,6 +571,7 @@ X-Switcher-Run = %q
 					next, reason := probeQuotaSelection("", samples, time.Now())
 					if next == "" {
 						mu.Unlock()
+						report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": reason})
 						http.Error(w, reason, 409)
 						return
 					}
@@ -553,7 +580,7 @@ X-Switcher-Run = %q
 				if session == "" {
 					session = root
 				}
-				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}}
+				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}, report: report}
 				auxiliary[id] = a
 			}
 			mu.Unlock()
@@ -664,12 +691,14 @@ X-Switcher-Run = %q
 		busy, session = true, id
 		activeCompactItems = nil
 		activeCredential = [32]byte{}
+		activeTurnOwner = [32]byte{}
 		requestDone = make(chan struct{})
 		finished := requestDone
 		terminalReady = false
 		revision++
 		selected := slot
 		owner := previousSlot
+		ownerCredential := previousCredential
 		state("probe_state", false)
 		if checkpointErr != nil {
 			busy = false
@@ -704,6 +733,7 @@ X-Switcher-Run = %q
 			busy = false
 			activeCompactItems = nil
 			activeCredential = [32]byte{}
+			activeTurnOwner = [32]byte{}
 			terminalReady = false
 			revision++
 			state("probe_state", false)
@@ -740,20 +770,28 @@ X-Switcher-Run = %q
 			if *toolsMode {
 				items := probeCompactItems(body)
 				var credential [32]byte
-				if len(items) > 0 {
-					c, accessErr := access.Access(selected, time.Now())
-					if accessErr == nil {
-						credential = sha256.Sum256([]byte(c.Token))
-					}
+				c, accessErr := access.Access(selected, time.Now())
+				if accessErr == nil {
+					credential = c.HistoryCredential()
 				}
-				body, err = probeToolBodyWithCompaction(body, selected, owner, secret, func(item map[string]json.RawMessage) bool {
+				if credential == ([32]byte{}) || credential != ownerCredential {
+					owner = ""
+				}
+				body, err = probeToolBodyWithOwnership(body, selected, owner, secret+":"+hex.EncodeToString(credential[:]), func(item map[string]json.RawMessage) bool {
 					mu.Lock()
 					defer mu.Unlock()
 					return compactOwners.permits(item, selected, credential)
+				}, func(item map[string]json.RawMessage) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					return reasoningOwners.permits(item, credential)
 				})
 				if err == nil {
 					mu.Lock()
 					activeCompactItems = items
+					if probeNeedsTurnOwner(body) {
+						activeTurnOwner = ownerCredential
+					}
 					if len(items) == 0 {
 						opaqueSlot = ""
 					}
@@ -778,6 +816,7 @@ X-Switcher-Run = %q
 			if errors.As(err, &parsed) {
 				detail = parsed
 			}
+			diagnostic.RejectionDetail = detail.Reason
 			report(map[string]any{"event": "probe_blocked", "code": code, "detail": detail})
 			return
 		}
@@ -803,12 +842,18 @@ X-Switcher-Run = %q
 		failed = d.Status != 200 || d.ResponseFailure != "" || d.Rejection != ""
 		if compact && !failed {
 			previousSlot = selected
+			previousCredential = activeCredential
 		}
 		if *toolsMode && !compact {
 			failed = failed || !turn.valid()
+			if !failed && !reasoningOwners.accept(turn.reasoning, activeCredential, lastUserBoundary) {
+				failed = true
+				d.ResponseFailure = "probe_reasoning_ownership_unavailable"
+			}
 			turnPending = !failed && turn.pending()
 			if !failed {
 				previousSlot = selected
+				previousCredential = activeCredential
 			}
 		}
 		completed = !failed
@@ -840,7 +885,7 @@ X-Switcher-Run = %q
 	}
 	go server.Serve(listener)
 	mu.Lock()
-	report(map[string]any{"event": "probe_ready", "slot": slot, "codex_home": home, "instruction": instruction})
+	report(map[string]any{"event": "probe_ready", "slot": slot, "codex_home": home, "instruction": instruction, "build_id": processBuildID, "protocol_version": controlProtocolVersion})
 	state("probe_state", false)
 	mu.Unlock()
 	go func() {
@@ -1010,6 +1055,7 @@ X-Switcher-Run = %q
 					}
 					failed, recoveryRequired = false, true
 					previousSlot = ""
+					previousCredential = [32]byte{}
 				}
 				slot = target
 				chosen = true

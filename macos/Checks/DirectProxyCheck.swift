@@ -125,6 +125,39 @@ struct DirectProxyCheck {
         print("PASS: broken relay poll/select/refresh/shutdown survive default SIGPIPE, detach without replay, reconnect explicitly and ignore stale EOF")
     }
 
+    @MainActor private static func checkDiagnostics() {
+        let store = DirectProxyStore()
+        func event(_ object: [String: Any]) {
+            store.receiveDiagnosticEvent(try! JSONSerialization.data(withJSONObject: object))
+        }
+        let old = String(repeating: "a", count: 64), new = String(repeating: "b", count: 64)
+        store.ready = true
+        precondition(store.buildWarning != nil)
+        event(["event":"helper_build", "build_id":new, "protocol_version":1])
+        event(["event":"probe_ready", "build_id":new, "protocol_version":1])
+        precondition(store.buildWarning == nil && store.helperBuild == new && store.proxyBuild == new)
+        event(["event":"probe_ready", "build_id":old, "protocol_version":1])
+        precondition(store.buildWarning!.contains("다릅니다"))
+        event(["event":"probe_ready", "build_id":new, "protocol_version":99])
+        precondition(store.buildWarning!.contains("제어 버전"))
+        event(["event":"probe_ready", "codex_home":"/synthetic-secret"])
+        precondition(store.proxyBuild == nil && store.buildWarning!.contains("확인할 수 없습니다"))
+        let at = "2026-09-21T00:00:00Z"
+        event(["event":"probe_diagnostic", "scope":"root", "code":"history_owner_unavailable", "at":at,
+               "body":"synthetic-secret", "account_id":"synthetic-secret"])
+        event(["event":"probe_diagnostic", "scope":"auxiliary", "code":"agent_message_shape_unsupported", "at":at])
+        precondition(store.diagnostics.count == 2 && store.rootDiagnostic?.code == "history_owner_unavailable")
+        precondition(store.auxiliaryDiagnostic?.title.contains("에이전트") == true)
+        event(["event":"probe_diagnostic", "scope":"root", "code":"synthetic-secret", "at":at])
+        event(["event":"probe_diagnostic", "scope":"root", "code":"history_unsupported", "at":"synthetic-secret"])
+        event(["event":"helper_build", "build_id":"/synthetic-secret"])
+        precondition(store.helperBuild == nil && store.rootDiagnostic?.code == "history_owner_unavailable")
+        precondition(!store.diagnosticText.contains("synthetic-secret"))
+        store.stop()
+        precondition(store.diagnosticsFromPreviousConnection && store.diagnostics.count == 2 && store.buildWarning == nil)
+        print("PASS: build match/mismatch/legacy protocol, diagnostic redaction, independent root/auxiliary guidance and stale connection labeling")
+    }
+
     @MainActor static func main() async throws {
         if CommandLine.arguments.contains("proxy-connect") {
             func emit(_ value: [String: Any]) {
@@ -222,6 +255,7 @@ struct DirectProxyCheck {
             try await checkBrokenRelay(CommandLine.arguments.last!, directory: directory)
             return
         }
+        checkDiagnostics()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }

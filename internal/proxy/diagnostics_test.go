@@ -49,3 +49,30 @@ func TestUpstreamDiagnostic(t *testing.T) {
 		t.Fatal("upstream body leaked")
 	}
 }
+
+func TestResolverDiagnosticAllowlist(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		code   string
+		status int
+	}{
+		{ErrHistoryOwner, "history_owner_unavailable", 409},
+		{ErrCompactionOwner, "compaction_owner_unavailable", 409},
+		{ErrAuxiliaryCredential, "auxiliary_credential_changed", 409},
+		{ErrAuthenticationExpired, "authentication_expired", 401},
+		{ErrAccountUnavailable, "account_unavailable", 401},
+		{errors.New("history_owner_unavailable"), "session_unavailable", 401},
+		{errors.New("synthetic-secret"), "session_unavailable", 401},
+	} {
+		h, err := New("http://127.0.0.1:1", func(*http.Request) (Identity, error) { return Identity{}, tc.err })
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("POST", "/responses", strings.NewReader(`{"input":"synthetic"}`)))
+		h.Close()
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.code) || strings.Contains(w.Body.String(), "synthetic-secret") || h.Diagnostics().Rejection != tc.code || h.Diagnostics().Attempts != 0 {
+			t.Fatal("resolver rejection was hidden, exposed, or dispatched")
+		}
+	}
+}

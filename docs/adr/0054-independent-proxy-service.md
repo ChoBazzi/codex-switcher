@@ -8,6 +8,8 @@
 
 2026-09-14: 정상 앱 종료는 프록시 종료까지 확인하도록 [ADR 0059](0059-app-and-proxy-lifecycle.md)에서 변경했다. 아래 앱 종료 후 daemon 유지 설명은 과거 동작이며, 독립 프로세스와 crash 복구 구조는 유지한다.
 
+2026-09-21: [ADR 0062](0062-safe-diagnostics-and-build-status.md)에서 원문을 제외한 고정 오류 분류의 메모리 캐시와 앱 전달, 실행 프록시/relay 빌드 비교를 추가했다.
+
 ## 결정과 선택지
 
 메뉴바 앱이 소유하던 `switch-probe --managed`를 독립 프로세스 `proxy-daemon` 안에서 실행한다. 앱은 `proxy-connect` relay만 소유한다. 기존 stdin JSON 명령·상태 형식과 프록시의 전환/실패/도구/압축 정책을 재사용한다.
