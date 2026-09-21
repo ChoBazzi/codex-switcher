@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// A zero-value mutation gate with cancellable waiters. No helper goroutine is
+// A zero-value exclusive gate with cancellable waiters. No helper goroutine is
 // left queued to start an exchange after its caller has canceled.
 type operationLock struct {
 	once sync.Once

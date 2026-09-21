@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -65,8 +64,8 @@ type Status struct {
 // Callers must additionally hold the application process lock for mutations.
 type Manager struct {
 	operationMu operationLock // Credential mutations serialize; request waiters can cancel.
-	mu          sync.Mutex
-	refreshSlot string // guarded by mu; the durable blocked marker remains authoritative on restart
+	mu          operationLock // Local credential reads/writes; request waiters can cancel.
+	refreshSlot string        // guarded by mu; the durable blocked marker remains authoritative on restart
 	vault       credentialstore.Vault
 	tempParent  string
 	refresher   Refresher

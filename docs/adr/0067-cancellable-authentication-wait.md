@@ -12,6 +12,8 @@ CLI 연결이 끊기거나 요청이 취소되어도 인증 resolver는 mutation
 
 ## 결정
 
+2026-09-21: [ADR 0068](0068-valid-account-access-during-refresh.md)에서 갱신이 필요 없는 인증은 mutation 잠금 대기 전에 조회하도록 개선한다. 같은 계정 갱신의 대기 취소와 이미 시작한 교환의 안전한 저장은 유지한다.
+
 - `RequestAccessContext`에 루트·보조 HTTP 요청 context와 사용량 조회 context를 전달한다. 기존 `RequestAccess`는 background context를 사용하는 호환 진입점으로 유지한다.
 - mutation 잠금은 용량 1의 channel을 사용하며 대기 중 취소되면 인증 결과 없이 반환한다. 로그인·로그아웃과의 직렬화, 프로세스 간 계정 작업 잠금 및 재조회는 유지한다. 취소된 대기자를 위한 별도 goroutine이나 자동 재시도는 만들지 않는다.
 - 진입 시점, 잠금 획득 후, `refresh_blocked` 저장 직전에 취소를 확인한다. 영속 의도 저장이 시작되면 CLI 취소와 독립적인 기존 15초 OAuth 제한 아래 한 번만 교환한다. 신원 검증과 토큰·이력 소유권 저장까지 mutation 잠금 및 프로세스 간 잠금을 유지한다.
@@ -35,3 +37,5 @@ CLI 연결이 끊기거나 요청이 취소되어도 인증 resolver는 mutation
 - 전체 검증 명령: `sh macos/Checks/verify.sh`. 실제 계정·실행 중인 사용자 daemon은 변경하지 않는다.
 
 2026-09-21: 계정 관리자 전체 race 검사, 프록시·사용량의 갱신/취소 관련 race 검사, 포트 없는 보조 handler·진단·이력 사전 검사, `go vet ./...`, Swift 빌드와 `DirectProxyCheck`를 통과했다. 실제 HTTP 서버를 사용하는 `TestProbeCanceledAuthenticationWait`는 샌드박스의 포트 바인딩 제한으로 실행하지 못했다. 권한 확대 실행의 자동 승인 검토도 실패하여 이번 변경의 전체 통합 검증은 대기 상태다.
+
+2026-09-21 후속: ADR 0068 구현과 함께 권한 확대 실행이 허용되어 `sh macos/Checks/verify.sh` 전체 검증을 통과했다. 위에서 미완료로 남긴 메인·보조 HTTP 인증 대기 취소 검사도 통과하여 합성 통합 검증의 대기 상태를 해소했다.

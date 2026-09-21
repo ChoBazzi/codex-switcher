@@ -117,6 +117,9 @@ func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, 
 	if m.refresher == nil {
 		return m.Access(slot, now)
 	}
+	if a, ready, err := m.requestAccessWithoutRefresh(requestCtx, slot, now); ready {
+		return a, err
+	}
 	if err := m.operationMu.LockContext(requestCtx); err != nil {
 		return Access{}, err
 	}
@@ -227,6 +230,43 @@ func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, 
 		return Access{}, err
 	}
 	return r.Accounts[i].access(), nil
+}
+
+// Only read committed credentials here. Login/logout still exclude this read
+// through mu; its context-aware wait also covers local read contention. A same-slot
+// exchange must join the mutation queue and read its final committed outcome.
+func (m *Manager) requestAccessWithoutRefresh(ctx context.Context, slot string, now time.Time) (Access, bool, error) {
+	if err := m.mu.LockContext(ctx); err != nil {
+		return Access{}, true, err
+	}
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Access{}, true, err
+	}
+	if !validSlot(slot) {
+		return Access{}, true, ErrSlot
+	}
+	if m.refreshSlot == slot {
+		return Access{}, false, nil
+	}
+	r, err := m.read()
+	if err != nil {
+		return Access{}, true, err
+	}
+	for _, a := range r.Accounts {
+		if a.Slot != slot {
+			continue
+		}
+		if a.RefreshBlocked {
+			return Access{}, true, ErrRefresh
+		}
+		if a.Credentials.ExpiresAt.After(now.Add(2 * time.Minute)) {
+			return a.access(), true, nil
+		}
+		// Re-read under the mutation lock before making any refresh decision.
+		return Access{}, false, nil
+	}
+	return Access{}, true, ErrNotRegistered
 }
 
 // RoundTripper may close a request asynchronously after Do returns. Coordinate

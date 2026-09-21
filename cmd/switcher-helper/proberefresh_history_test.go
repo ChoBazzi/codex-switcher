@@ -340,3 +340,48 @@ func TestProbeStatusAvailableDuringRefresh(t *testing.T) {
 		t.Fatal("request did not finish")
 	}
 }
+
+func TestProbeOtherAccountDuringRefresh(t *testing.T) {
+	source := newRefreshHistorySource(t)
+	source.exchange.entered, source.exchange.release = make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(source.exchange.release) }) }
+	defer unblock()
+	beta, err := source.Access("b", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	up := historyUpstream(&calls, func(r *http.Request, _ []byte) {
+		if r.Header.Get("Authorization") != "Bearer "+beta.Token || r.Header.Get("ChatGPT-Account-ID") != beta.AccountID {
+			t.Error("request used another account's authentication")
+		}
+	})
+	defer up.Close()
+	p := startHistoryProbe(t, source, up.URL, t.TempDir())
+	if _, err := io.WriteString(p.commands, "{\"action\":\"select\",\"slot\":\"b\",\"revision\":0}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if p.next(t, "probe_selection")["accepted"] != true {
+		t.Fatal("could not select synthetic account")
+	}
+	source.elapsed.Store(int64(2 * time.Hour))
+	done := make(chan error, 1)
+	go func() { _, err := source.RequestAccess("a", time.Now()); done <- err }()
+	select {
+	case <-source.exchange.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("refresh did not start")
+	}
+	// Both resolvers must dispatch B while A's exchange remains blocked.
+	if p.send(t, "/responses", historyFirst) != 200 || p.sendThread(t, "/responses", historyFirst, "23456789-2345-4345-8345-234567890123") != 200 {
+		t.Fatal("valid account could not dispatch during another account's refresh")
+	}
+	if calls.Load() != 2 || source.exchange.calls.Load() != 1 {
+		t.Fatal("unexpected model or refresh replay")
+	}
+	unblock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
