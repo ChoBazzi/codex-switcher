@@ -44,7 +44,7 @@ func diagnosticCategory(code string) string {
 		return code
 	case "auxiliary_credential_changed":
 		return code
-	case "authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable", "request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached":
+	case "authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable", "request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached", "request_canceled":
 		return code
 	case "probe_identity_invalid":
 		return "cli_identity_invalid"

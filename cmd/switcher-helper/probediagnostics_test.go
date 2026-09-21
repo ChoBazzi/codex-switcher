@@ -22,6 +22,8 @@ func TestProbeDiagnosticRedaction(t *testing.T) {
 		{`{"event":"probe_request_finished","last_http_status":401,"local_rejection_code":"authentication_expired"}`, "authentication_expired", "root"},
 		{`{"event":"probe_request_finished","last_http_status":503,"local_rejection_code":"credential_store_unavailable"}`, "credential_store_unavailable", "root"},
 		{`{"event":"probe_auxiliary_finished","last_http_status":408,"code":"request_body_timeout"}`, "request_body_timeout", "auxiliary"},
+		{`{"event":"probe_request_finished","last_http_status":408,"local_rejection_code":"request_canceled"}`, "request_canceled", "root"},
+		{`{"event":"probe_auxiliary_finished","last_http_status":408,"local_rejection_code":"request_canceled"}`, "request_canceled", "auxiliary"},
 		{`{"event":"probe_blocked","scope":"auxiliary","code":"auxiliary_capacity_reached"}`, "auxiliary_capacity_reached", "auxiliary"},
 		{`{"event":"probe_request_finished","last_http_status":429}`, "upstream_rate_limited", "root"},
 		{`{"event":"probe_request_finished","last_http_status":403}`, "upstream_auth_rejected", "root"},

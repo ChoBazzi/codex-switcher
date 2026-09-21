@@ -96,13 +96,36 @@ func NewRefreshing(v credentialstore.Vault, stateDir string, refresher Refresher
 // RequestAccess is called only for explicit model requests and scheduled or
 // explicit usage reads. Access/Status remain local-only, including UI selection.
 func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
+	return m.RequestAccessContext(context.Background(), slot, now)
+}
+
+// Cancellation removes a queued request immediately. Once the durable refresh
+// intent is written, finish the single exchange and commit under its independent
+// timeout before returning cancellation. Never discard rotated credentials.
+func (m *Manager) RequestAccessContext(ctx context.Context, slot string, now time.Time) (Access, error) {
+	a, err := m.requestAccessContext(ctx, slot, now)
+	if ctx.Err() != nil {
+		return Access{}, ctx.Err()
+	}
+	return a, err
+}
+
+func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, now time.Time) (Access, error) {
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	if m.refresher == nil {
 		return m.Access(slot, now)
 	}
-	m.operationMu.Lock()
+	if err := m.operationMu.LockContext(requestCtx); err != nil {
+		return Access{}, err
+	}
 	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	if !validSlot(slot) {
 		return Access{}, ErrSlot
 	}
@@ -166,6 +189,9 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	}
 	// Persist before dispatch: a crash or lost response must not replay a possibly
 	// consumed refresh token. Explicit reauthentication clears this marker.
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	r.Accounts[i].RefreshBlocked = true
 	if err = save(); err != nil {
 		return Access{}, err

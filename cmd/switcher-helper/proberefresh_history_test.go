@@ -81,6 +81,9 @@ func (s *refreshHistorySource) Access(slot string, now time.Time) (accounts.Acce
 func (s *refreshHistorySource) RequestAccess(slot string, now time.Time) (accounts.Access, error) {
 	return s.Manager.RequestAccess(slot, now.Add(time.Duration(s.elapsed.Load())))
 }
+func (s *refreshHistorySource) RequestAccessContext(ctx context.Context, slot string, now time.Time) (accounts.Access, error) {
+	return s.Manager.RequestAccessContext(ctx, slot, now.Add(time.Duration(s.elapsed.Load())))
+}
 func refreshHistoryCredentials(t *testing.T, account, user string, expires time.Time) accounts.Credentials {
 	t.Helper()
 	claims, _ := json.Marshal(map[string]any{"exp": expires.Unix(), "https://api.openai.com/auth": map[string]string{"chatgpt_account_id": account, "chatgpt_user_id": user}})

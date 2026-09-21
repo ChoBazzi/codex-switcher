@@ -442,7 +442,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		mu.Lock()
 		selected, conversation := slot, session
 		mu.Unlock()
-		c, err := usage.RequestAccess(access, selected, time.Now())
+		c, err := usage.RequestAccessContext(r.Context(), access, selected, time.Now())
 		if err != nil {
 			return proxy.Identity{}, probeAccessError(err)
 		}

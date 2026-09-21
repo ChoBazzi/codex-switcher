@@ -12,6 +12,8 @@
 
 ## 결정
 
+2026-09-21: [ADR 0067](0067-cancellable-authentication-wait.md)에서 mutation 잠금 대기를 취소 가능하게 변경한다. 시작한 갱신의 안전한 저장과 기존 실패 차단은 유지한다.
+
 - managed probe HTTP 서버에 30초 `ReadTimeout`, 기존 5초 `ReadHeaderTimeout`을 적용한다. 요청 본문은 기존 4 MiB 제한을 유지한다. 응답 쓰기 제한은 추가하지 않고 기존 upstream 10분 제한을 유지한다. 루트·보조 본문 실패는 timeout 408, 크기 초과 413, 기타 수신 실패 400으로 분류한다. 기존 실패 고정 및 activity 해제 경로를 따른다.
 - 계정 관리자에 mutation 전용 `operationMu`를 둔다. 로그인·로그아웃·RequestAccess는 이 잠금으로 직렬화한다. 갱신은 프로세스 간 계정 작업 lock과 mutation 잠금을 저장 완료까지 유지하되, OAuth 네트워크 대기 중 로컬 조회 mutex만 해제한다. Keychain commit 전후 경계와 단일 exchange 원칙은 유지한다.
 - 같은 manager의 갱신 중 이력 조회에는 직전 소유권만 제공한다. 실제 dispatch는 mutation 잠금을 기다린 뒤 저장된 결과를 확인한다. usable `Access`는 blocked marker를 계속 거절한다. 실패/재시작 후에는 진행 중인 exchange가 없으므로 이력 조회도 거절한다. 메모리의 진행 상태로 marker를 지우거나 저장 실패를 성공으로 취급하지 않는다.

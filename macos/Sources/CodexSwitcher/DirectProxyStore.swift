@@ -469,6 +469,7 @@ struct ProxyDiagnostic: Identifiable {
     var id: String { scope }
     var scopeLabel: String { scope == "root" ? "메인 대화" : "보조 작업" }
     static let descriptions: [String: (String, String)] = [
+        "request_canceled": ("모델 전송 전에 요청이 취소됐습니다", "CLI 입력창으로 돌아온 뒤 필요한 경우 새 지시를 입력하세요. 취소된 요청은 자동으로 다시 보내지 않습니다."),
         "request_body_timeout": ("요청 본문 수신 시간이 초과됐습니다", "CLI 연결 상태를 확인한 뒤 새 지시를 입력하세요. 중단된 요청은 자동으로 다시 보내지 않습니다."),
         "request_too_large": ("요청이 4 MiB 제한을 초과했습니다", "이미지나 도구 결과 크기를 줄이고 새 지시를 입력하세요."),
         "request_unreadable": ("요청 본문을 끝까지 받지 못했습니다", "CLI 연결 상태를 확인하고 새 지시를 입력하세요."),

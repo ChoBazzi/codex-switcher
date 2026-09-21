@@ -150,8 +150,8 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	}
 	mu.Lock()
 	if a.handler == nil {
-		a.handler, err = proxy.New(upstream, func(_ *http.Request) (proxy.Identity, error) {
-			c, e := usage.RequestAccess(access, a.binding.Slot, time.Now())
+		a.handler, err = proxy.New(upstream, func(request *http.Request) (proxy.Identity, error) {
+			c, e := usage.RequestAccessContext(request.Context(), access, a.binding.Slot, time.Now())
 			if e != nil {
 				return proxy.Identity{}, probeAccessError(e)
 			}

@@ -64,7 +64,7 @@ type Status struct {
 
 // Callers must additionally hold the application process lock for mutations.
 type Manager struct {
-	operationMu sync.Mutex // Credential mutations serialize; local reads stay available during OAuth.
+	operationMu operationLock // Credential mutations serialize; request waiters can cancel.
 	mu          sync.Mutex
 	refreshSlot string // guarded by mu; the durable blocked marker remains authoritative on restart
 	vault       credentialstore.Vault

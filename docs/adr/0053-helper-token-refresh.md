@@ -10,6 +10,8 @@
 
 ## 결정
 
+2026-09-21: [ADR 0067](0067-cancellable-authentication-wait.md)에 따라 인증 잠금 대기는 요청 context로 취소한다. 영속 갱신 의도 저장이 시작된 뒤에는 독립 timeout 아래 교환·저장을 마치며, 취소된 모델 요청을 전송하지 않는다.
+
 앱 프록시의 사용량 조회와 실제 모델 dispatch에서 `RequestAccess`를 사용한다. 만료까지 2분 이하이면 helper가 OAuth refresh exchange를 한 번 수행한다. `Access`, `Status`, 계정 선택 및 등록 상태 확인은 로컬 읽기로 유지한다. 별도 `usage`/legacy `exec` 명령에는 갱신 권한을 추가하지 않는다.
 
 갱신 endpoint와 public client ID는 설치된 Codex CLI 0.154.0 바이너리에서 기존 값의 존재를 확인했다. 요청은 `grant_type=refresh_token`, `client_id`, `refresh_token` JSON이며 응답의 access token은 필수, refresh/id token은 반환된 경우 교체한다. 이것은 공개 OAuth 호환성 보증이 아니다. 이번 환경에서 공식 문서 조회가 DNS 제한 및 자동 승인 검토 오류로 실패했으므로 실계정 응답 호환성은 별도 검증한다.

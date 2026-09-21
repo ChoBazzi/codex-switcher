@@ -206,7 +206,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.reject(w, 400, "unsupported_transport")
 		return
 	}
+	if r.Context().Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
+	}
 	identity, err := h.resolve(r)
+	if r.Context().Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
+	}
 	if err != nil || identity.Session == "" || identity.Token == "" {
 		status, code := identityRejection(err)
 		h.reject(w, status, code)
@@ -279,6 +287,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.reject(w, 409, "request_dispatch_rejected")
 			return
 		}
+	}
+	if ctx.Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
 	}
 	h.mu.Lock()
 	h.diagnostic.Attempts++
