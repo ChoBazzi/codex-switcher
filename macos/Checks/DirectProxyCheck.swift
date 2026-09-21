@@ -45,6 +45,7 @@ struct DirectProxyCheck {
         let helper = URL(fileURLWithPath: CommandLine.arguments[0])
         store.start(helper: helper)
         try await waitFor { store.ready }
+        precondition(store.auxiliaryCount == 127 && store.auxiliaryLimit == 128 && store.auxiliaryCapacityText.contains("1개 가능"))
         if action != "refresh" {
             // Leave a real usage request pending when a different command loses the relay.
             store.readUsage()
@@ -166,7 +167,7 @@ struct DirectProxyCheck {
             }
             var slot = "a", revision = 0, toolWaiting = false, failed = false, usageReads = 0
             func state(_ event: String, _ accepted: Bool = false) {
-                emit(["event":event,"slot":slot,"busy":toolWaiting,"failed":failed,"connected":true,"revision":revision,"accepted":accepted,"can_abandon_turn":toolWaiting])
+                emit(["event":event,"slot":slot,"busy":toolWaiting,"failed":failed,"connected":true,"revision":revision,"accepted":accepted,"can_abandon_turn":toolWaiting,"auxiliary_count":127,"auxiliary_limit":128])
             }
             let fixture = ProcessInfo.processInfo.environment[brokenRelayDirectoryKey].map { URL(fileURLWithPath: $0) }
             let broken = fixture.map { !FileManager.default.fileExists(atPath: $0.appendingPathComponent("healthy").path) } ?? false
@@ -256,6 +257,29 @@ struct DirectProxyCheck {
             return
         }
         checkDiagnostics()
+        var frames = ProxyEventFrames()
+        let wire = Data("{\"text\":\"합성\"}\n{\"event\":\"probe_state\"}\n".utf8)
+        var decoded: [Data] = []
+        // A one-byte split also cuts inside multibyte Korean characters.
+        for byte in wire { decoded += try frames.append(Data([byte])) }
+        precondition(decoded.count == 2 && String(data: decoded[0], encoding: .utf8) == "{\"text\":\"합성\"}")
+        var batch = ProxyEventFrames()
+        let batched = try batch.append(wire)
+        precondition(batched == decoded)
+        let partial = try batch.append(Data("partial".utf8))
+        precondition(partial.isEmpty)
+        var oversized = ProxyEventFrames()
+        let exact = try oversized.append(Data(repeating: 97, count: 8192))
+        precondition(exact.isEmpty)
+        let exactLine = try oversized.append(Data([10]))
+        precondition(exactLine.first?.count == 8192)
+        do {
+            _ = try oversized.append(Data(repeating: 97, count: 8193))
+            preconditionFailure("oversized relay record accepted")
+        } catch ProxyEventFrames.Failure.oversized {}
+        for code in ["request_body_timeout", "request_too_large", "request_unreadable", "credential_store_unavailable", "auxiliary_capacity_reached"] {
+            precondition(ProxyDiagnostic(scope: "root", code: code, at: "2026-09-21T00:00:00Z") != nil)
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -19,7 +19,8 @@ import (
 )
 
 // Mutable synthetic source models replacement both between requests and during
-// RequestAccess (e.g. refresh). No real vault, daemon, or OAuth endpoint is used.
+// RequestAccess without a verified refresh. No real vault, daemon, or OAuth
+// endpoint is used.
 type historyAccess struct {
 	mu       sync.Mutex
 	current  accounts.Access
@@ -71,11 +72,14 @@ const historyFirst = `{"input":[{"role":"user","content":"synthetic request"}]}`
 const historyFollowup = `{"input":[{"role":"user","content":"synthetic request"},` + historyReasoning + `]}`
 const historyCompact = `{"input":[{"role":"user","content":"synthetic request"},{"type":"compaction","id":"cmp_synthetic","encrypted_content":"synthetic-compact"}]}`
 
-func historyUpstream(calls *atomic.Int32) *httptest.Server {
+func historyUpstream(calls *atomic.Int32, checks ...func(*http.Request, []byte)) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		b, _ := io.ReadAll(r.Body)
 		r.Body.Close()
+		for _, check := range checks {
+			check(r, b)
+		}
 		if r.URL.Path == "/compact" {
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `{"object":"response.compaction","output":[{"role":"user","content":"synthetic request"},{"type":"compaction","id":"cmp_synthetic","encrypted_content":"synthetic-compact"}]}`)
@@ -162,8 +166,12 @@ func (p *historyProbe) next(t *testing.T, kind string) map[string]any {
 }
 func (p *historyProbe) send(t *testing.T, path, body string) int {
 	t.Helper()
+	return p.sendThread(t, path, body, "12345678-1234-4234-8234-123456789012")
+}
+func (p *historyProbe) sendThread(t *testing.T, path, body, thread string) int {
+	t.Helper()
 	req, _ := http.NewRequest("POST", p.address+path, strings.NewReader(body))
-	req.Header.Set("Thread-Id", "12345678-1234-4234-8234-123456789012")
+	req.Header.Set("Thread-Id", thread)
 	req.Header.Set("Session-Id", "12345678-1234-4234-8234-123456789012")
 	req.Header.Set("X-Switcher-Run", p.secret)
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)

@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,7 +73,7 @@ func TestHistoryCredentialIdentityAndMissingClaims(t *testing.T) {
 	}
 }
 
-func TestHistoryCredentialRefreshPreservesRegistration(t *testing.T) {
+func TestHistoryCredentialVerifiedRefresh(t *testing.T) {
 	m, v := refreshFixture(t, refreshFunc(func(context.Context, Credentials) (Credentials, error) { return renewed(t, "alpha"), nil }))
 	var stored registry
 	if json.Unmarshal(v.data, &stored) != nil {
@@ -91,11 +92,102 @@ func TestHistoryCredentialRefreshPreservesRegistration(t *testing.T) {
 	if before.Registration != after.Registration || before.UserID != after.UserID || before.AccountID != after.AccountID {
 		t.Fatal("refresh changed identity or registration")
 	}
-	if before.Token == after.Token || before.HistoryCredential() == after.HistoryCredential() {
-		t.Fatal("refresh did not change credential binding")
+	if before.Token == after.Token || before.HistoryCredential() != after.HistoryCredential() {
+		t.Fatal("verified refresh lost history ownership")
 	}
 	restored, err := New(v, m.tempParent).Access("a", time.Now())
 	if err != nil || restored.HistoryCredential() != after.HistoryCredential() {
 		t.Fatal("refreshed binding not durable")
+	}
+	// A second verified rotation preserves the original owner across restarts.
+	m = NewRefreshing(v, m.tempParent, refreshFunc(func(context.Context, Credentials) (Credentials, error) {
+		return ParseAuth(syntheticAuth("alpha", time.Now().Add(4*time.Hour)))
+	}))
+	second, err := m.RequestAccess("a", time.Now().Add(2*time.Hour))
+	if err != nil || second.Token == after.Token || second.HistoryCredential() != before.HistoryCredential() {
+		t.Fatal("second verified refresh lost original ownership")
+	}
+	// A copied Access cannot reuse the binding with unverified new credentials.
+	for _, field := range []string{"token", "account", "user", "registration", "missing-user"} {
+		changed := second
+		switch field {
+		case "token":
+			changed.Token += "-other"
+		case "account":
+			changed.AccountID += "-other"
+		case "user":
+			changed.UserID += "-other"
+		case "registration":
+			changed.Registration += "-other"
+		case "missing-user":
+			changed.UserID = ""
+		}
+		if changed.HistoryCredential() == before.HistoryCredential() {
+			t.Fatal("refresh binding reused after unverified change: " + field)
+		}
+	}
+	if err := m.Reauthenticate(context.Background(), "a", writer("alpha"), nil); err != nil {
+		t.Fatal(err)
+	}
+	reauth, _ := m.Access("a", time.Now())
+	if reauth.history != nil || reauth.HistoryCredential() == before.HistoryCredential() {
+		t.Fatal("reauthentication retained refresh lineage")
+	}
+}
+
+func TestHistoryCredentialExpiredLocalRead(t *testing.T) {
+	var calls int
+	m, v := refreshFixture(t, refreshFunc(func(context.Context, Credentials) (Credentials, error) {
+		calls++
+		return renewed(t, "alpha"), nil
+	}))
+	var stored registry
+	_ = json.Unmarshal(v.data, &stored)
+	c, err := ParseAuth(syntheticAuth("alpha", time.Now().Add(-time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Accounts[0].Credentials = c
+	v.data, _ = json.Marshal(stored)
+	if _, err := m.Access("a", time.Now()); !errors.Is(err, ErrExpired) {
+		t.Fatal("expired authentication available")
+	}
+	owner, err := m.HistoryCredential("a")
+	if err != nil || owner == ([32]byte{}) || calls != 0 || v.writes != 0 {
+		t.Fatal("local ownership read unavailable or performed refresh/migration")
+	}
+	access, err := m.RequestAccess("a", time.Now())
+	if err != nil || calls != 1 || access.HistoryCredential() != owner {
+		t.Fatal("expired credential lost ownership during verified refresh")
+	}
+	for _, slot := range []string{"invalid", "b"} {
+		if owner, err := m.HistoryCredential(slot); err == nil || owner != ([32]byte{}) {
+			t.Fatal("unknown slot has an owner")
+		}
+	}
+}
+
+func TestHistoryCredentialStaleVaultBinding(t *testing.T) {
+	m, v := refreshFixture(t, refreshFunc(func(context.Context, Credentials) (Credentials, error) { return renewed(t, "alpha"), nil }))
+	first, err := m.RequestAccess("a", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored registry
+	_ = json.Unmarshal(v.data, &stored)
+	// Replace the token outside the verified exchange, retaining old metadata.
+	stored.Accounts[0].Credentials, err = ParseAuth(syntheticAuth("alpha", time.Now().Add(time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Accounts[0].Credentials.AccessToken += "-unverified"
+	v.data, _ = json.Marshal(stored)
+	changed, err := New(v, m.tempParent).HistoryCredential("a")
+	if err != nil || changed == first.HistoryCredential() || changed == ([32]byte{}) {
+		t.Fatal("stale vault binding authorized an unverified replacement")
+	}
+	after, err := m.RequestAccess("a", time.Now())
+	if err != nil || after.HistoryCredential() != changed || after.HistoryCredential() == first.HistoryCredential() {
+		t.Fatal("subsequent refresh resurrected stale ownership")
 	}
 }

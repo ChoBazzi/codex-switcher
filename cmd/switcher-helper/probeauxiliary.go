@@ -100,10 +100,10 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 
 		changed()
 	}()
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
-	r.Body.Close()
+	body, err := readProbeBody(w, r)
 	if err != nil {
-		reject("probe_tool_history_unsupported", 409)
+		status, code := probeBodyRejection(err)
+		reject(code, status)
 		return
 	}
 	hash := sha256.Sum256(body)

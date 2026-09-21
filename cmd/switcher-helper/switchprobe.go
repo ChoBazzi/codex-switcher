@@ -156,6 +156,19 @@ type probeAccess interface {
 	Access(string, time.Time) (accounts.Access, error)
 }
 
+func probeHistoryCredential(access probeAccess, slot string) ([32]byte, error) {
+	if local, ok := access.(interface {
+		HistoryCredential(string) ([32]byte, error)
+	}); ok {
+		return local.HistoryCredential(slot)
+	}
+	c, err := access.Access(slot, time.Now())
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return c.HistoryCredential(), nil
+}
+
 func probeSelectionAllowed(target string, expected, revision uint64, busy, failed bool) bool {
 	return (accountslot.Valid(target)) && expected == revision && !busy && !failed
 }
@@ -410,15 +423,22 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			turnLease = nil
 		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending || auxActive(), "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
+			"auxiliary_count": len(auxiliary), "auxiliary_limit": probeAuxiliaryLimit,
 			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending && !auxActive(),
 			"can_abandon_turn":    (!busy && !waiting && !auxBusy() && (auxPending() || probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)))})
 	}
 	resolve := func(r *http.Request) (proxy.Identity, error) {
 		mu.Lock()
-		defer mu.Unlock()
-		c, err := usage.RequestAccess(access, slot, time.Now())
+		selected, conversation := slot, session
+		mu.Unlock()
+		c, err := usage.RequestAccess(access, selected, time.Now())
 		if err != nil {
 			return proxy.Identity{}, probeAccessError(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if closing || checkpointErr != nil || slot != selected || session != conversation || r.Context().Err() != nil {
+			return proxy.Identity{}, proxy.ErrAccountUnavailable
 		}
 		activeCredential = c.HistoryCredential()
 		if activeTurnOwner != ([32]byte{}) && activeCredential != activeTurnOwner {
@@ -526,7 +546,7 @@ X-Switcher-Run = %q
 			_ = os.Remove(path)
 		}
 	}()
-	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := probeHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		if closing {
 			mu.Unlock()
@@ -561,10 +581,10 @@ X-Switcher-Run = %q
 			}
 			a := auxiliary[id]
 			if a == nil {
-				if failed || checkpointErr != nil || len(auxiliary) >= 128 {
+				if code := probeAuxiliaryAdmission(failed, checkpointErr != nil, len(auxiliary)); code != "" {
 					mu.Unlock()
-					report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": "probe_auxiliary_unavailable"})
-					http.Error(w, "probe_auxiliary_unavailable", 409)
+					report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": code})
+					http.Error(w, code, 409)
 					return
 				}
 				if *automatic && !chosen {
@@ -740,8 +760,13 @@ X-Switcher-Run = %q
 			close(finished)
 			mu.Unlock()
 		}()
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
-		r.Body.Close()
+		body, err := readProbeBody(w, r)
+		if err != nil {
+			status, code := probeBodyRejection(err)
+			diagnostic = proxy.Diagnostics{Status: status, Rejection: code}
+			http.Error(w, code, status)
+			return
+		}
 		if err == nil {
 			hash := sha256.Sum256(body)
 			boundary, hasUser := probeUserBoundary(body)
@@ -769,10 +794,12 @@ X-Switcher-Run = %q
 		if err == nil {
 			if *toolsMode {
 				items := probeCompactItems(body)
-				var credential [32]byte
-				c, accessErr := access.Access(selected, time.Now())
-				if accessErr == nil {
-					credential = c.HistoryCredential()
+				credential, accessErr := probeHistoryCredential(access, selected)
+				if accessErr != nil {
+					status, code := probeAuthenticationRejection(accessErr)
+					diagnostic = proxy.Diagnostics{Status: status, Rejection: code}
+					http.Error(w, code, status)
+					return
 				}
 				if credential == ([32]byte{}) || credential != ownerCredential {
 					owner = ""
@@ -871,7 +898,7 @@ X-Switcher-Run = %q
 				diagnostic.ResponseFailure = "probe_client_write_failed"
 			}
 		}
-	})}
+	}))
 	defer server.Close()
 	instruction := "Run CODEX_HOME=<codex_home> codex in another terminal. After a completed reply, type b here. No hooks. Plain text only. Local history remains in this temporary directory."
 	if *toolsMode {

@@ -84,7 +84,7 @@ func TestRefreshSingleFlightAndLocalInspection(t *testing.T) {
 }
 
 func TestRefreshFailureNeverReplaysAcrossRestart(t *testing.T) {
-	for _, kind := range []string{"network", "identity", "expired", "commit"} {
+	for _, kind := range []string{"network", "identity", "user", "expired", "commit"} {
 		t.Run(kind, func(t *testing.T) {
 			calls := 0
 			var vault *memoryVault
@@ -95,6 +95,8 @@ func TestRefreshFailureNeverReplaysAcrossRestart(t *testing.T) {
 					return Credentials{}, errors.New("synthetic-secret-server-error")
 				case "identity":
 					return renewed(t, "other"), nil
+				case "user":
+					return ParseAuth(syntheticUserAuth("alpha", "synthetic-other-user", time.Now().Add(time.Hour)))
 				case "expired":
 					c, _ := ParseAuth(syntheticAuth("alpha", time.Now().Add(time.Second)))
 					return c, nil
@@ -114,6 +116,9 @@ func TestRefreshFailureNeverReplaysAcrossRestart(t *testing.T) {
 			}
 			if calls != 1 {
 				t.Fatal("failed exchange replayed")
+			}
+			if owner, err := restarted.HistoryCredential("a"); !errors.Is(err, ErrRefresh) || owner != ([32]byte{}) {
+				t.Fatal("failed refresh retained usable history ownership")
 			}
 			states, _ := restarted.Status()
 			if states[0].State != "expired" {

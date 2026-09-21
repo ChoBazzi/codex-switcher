@@ -61,6 +61,7 @@ func TestResolverDiagnosticAllowlist(t *testing.T) {
 		{ErrAuxiliaryCredential, "auxiliary_credential_changed", 409},
 		{ErrAuthenticationExpired, "authentication_expired", 401},
 		{ErrAccountUnavailable, "account_unavailable", 401},
+		{ErrCredentialStore, "credential_store_unavailable", 503},
 		{errors.New("history_owner_unavailable"), "session_unavailable", 401},
 		{errors.New("synthetic-secret"), "session_unavailable", 401},
 	} {

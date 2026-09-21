@@ -665,7 +665,7 @@ struct ProxyDiagnosticsPanel: View {
                 Button("진단 복사") { direct.copyDiagnostics() }
             }
             Text(direct.ready ? (direct.busy ? "프록시 연결됨 · 작업 중" : "프록시 연결됨") : "프록시 연결 미확인")
-            Text("앱: \(direct.appVersion)")
+            Text("앱: \(direct.appVersion) · \(direct.auxiliaryCapacityText)")
             Text("연결 시 helper: \(direct.helperBuild.map { String($0.prefix(12)) } ?? "미확인")")
             Text("실행 프록시: \(direct.proxyBuild.map { String($0.prefix(12)) } ?? "미확인")")
             if let warning = direct.buildWarning {

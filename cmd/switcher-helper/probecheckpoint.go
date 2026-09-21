@@ -78,7 +78,7 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		}
 	}
 	seenAux := map[string]bool{}
-	if len(c.Auxiliary) > 128 {
+	if len(c.Auxiliary) > probeAuxiliaryLimit {
 		return nil, errCheckpoint
 	}
 	for _, a := range c.Auxiliary {

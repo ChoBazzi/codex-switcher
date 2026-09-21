@@ -6,6 +6,8 @@
 
 2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
 
+2026-09-21: [ADR 0064](0064-verified-refresh-history-continuity.md)에 따라 helper가 동일 신원을 검증하고 저장한 정상 갱신은 기존 소유권을 유지한다. 검증되지 않은 인증 변경과 다른 계정으로의 이전은 계속 거절한다.
+
 2026-09-11: 독립 daemon의 crash 복구·연결 정보와 compaction 소유권 해시 보존은 [ADR 0055](0055-proxy-crash-session-recovery.md)가 아래 재시작 시 유실 설명을 대체합니다.
 
 ## 확인한 동작

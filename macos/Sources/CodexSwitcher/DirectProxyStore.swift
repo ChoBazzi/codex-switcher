@@ -3,6 +3,25 @@ import Darwin
 import Foundation
 import SwitcherUIModel
 
+// Preserve UTF-8 bytes across pipe reads. Reject overlong records before decoding.
+struct ProxyEventFrames {
+    enum Failure: Error { case oversized }
+    private var pending = Data()
+    mutating func append(_ chunk: Data) throws -> [Data] {
+        var lines: [Data] = []
+        for byte in chunk {
+            if byte == 10 {
+                lines.append(pending)
+                pending.removeAll(keepingCapacity: true)
+            } else {
+                guard pending.count < 8192 else { throw Failure.oversized }
+                pending.append(byte)
+            }
+        }
+        return lines
+    }
+}
+
 /// Owns a disposable relay. The independent service retains the CLI and proxy.
 @MainActor
 final class DirectProxyStore: ObservableObject {
@@ -22,6 +41,12 @@ final class DirectProxyStore: ObservableObject {
     @Published private(set) var rootDiagnostic: ProxyDiagnostic?
     @Published private(set) var auxiliaryDiagnostic: ProxyDiagnostic?
     @Published private(set) var diagnosticsFromPreviousConnection = false
+    @Published private(set) var auxiliaryCount: Int?
+    @Published private(set) var auxiliaryLimit: Int?
+    var auxiliaryCapacityText: String {
+        guard let count = auxiliaryCount, let limit = auxiliaryLimit else { return "보조 작업 용량: 미확인" }
+        return "보조 작업 기록: \(count)/\(limit) · 새 작업 \(limit - count)개 가능"
+    }
     var diagnostics: [ProxyDiagnostic] { [rootDiagnostic, auxiliaryDiagnostic].compactMap { $0 } }
     var appVersion: String {
         guard let value = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
@@ -39,7 +64,7 @@ final class DirectProxyStore: ObservableObject {
         let rows = diagnostics.map { "\($0.scopeLabel): \($0.code) · \($0.at)" }
         return (["Codex Switcher \(appVersion)", "연결: \(state)",
                  "연결 시 helper: \(helperBuild ?? "미확인")", "실행 프록시: \(proxyBuild ?? "미확인")",
-                 "프록시 제어 버전: \(proxyProtocol.map(String.init) ?? "미확인")",
+                 "프록시 제어 버전: \(proxyProtocol.map(String.init) ?? "미확인")", auxiliaryCapacityText,
                  diagnosticsFromPreviousConnection ? "오류 기록: 이전 연결" : "오류 기록: 현재 연결"] + rows).joined(separator: "\n")
     }
     func copyDiagnostics() {
@@ -148,13 +173,16 @@ final class DirectProxyStore: ObservableObject {
         Task.detached { [weak self] in
             defer { try? sink.fileHandleForReading.close() }
             do {
-                var line = Data()
-                while let byte = try sink.fileHandleForReading.read(upToCount: 1), !byte.isEmpty {
-                    if byte.first == 10 {
-                        await self?.receive(line, run: run); line.removeAll(keepingCapacity: true)
-                    } else {
-                        guard line.count < 8192 else { break }
-                        line.append(byte)
+                var frames = ProxyEventFrames()
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    let count = buffer.withUnsafeMutableBytes {
+                        Darwin.read(sink.fileHandleForReading.fileDescriptor, $0.baseAddress, $0.count)
+                    }
+                    if count < 0 && errno == EINTR { continue }
+                    if count <= 0 { break }
+                    for line in try frames.append(Data(buffer.prefix(count))) {
+                        await self?.receive(line, run: run)
                     }
                 }
             } catch {}
@@ -177,6 +205,7 @@ final class DirectProxyStore: ObservableObject {
             var can_abandon_turn: Bool?
             var can_recover_current: Bool?
             var request_id: UInt64?; var status: String?; var succeeded: Bool?
+            var auxiliary_count: Int?; var auxiliary_limit: Int?
         }
         guard let e = try? JSONDecoder().decode(Event.self, from: data) else { return }
         if e.event == "probe_shutdown", stopping {
@@ -215,6 +244,10 @@ final class DirectProxyStore: ObservableObject {
               AccountSlots.all.contains(nextSlot), let nextBusy = e.busy, let nextFailed = e.failed,
               let nextConnected = e.connected, let nextRevision = e.revision else { return }
         slot = nextSlot; busy = nextBusy; failed = nextFailed; connected = nextConnected
+        if let count = e.auxiliary_count, let limit = e.auxiliary_limit,
+           (1...128).contains(limit), (0...limit).contains(count) {
+            auxiliaryCount = count; auxiliaryLimit = limit
+        } else { auxiliaryCount = nil; auxiliaryLimit = nil }
         canRecoverCurrent = e.can_recover_current == true && nextFailed && !nextBusy
         toolWaiting = e.can_abandon_turn == true && nextBusy
         revision = nextRevision; lastRead = Date(); waitingStatus = false
@@ -347,6 +380,7 @@ final class DirectProxyStore: ObservableObject {
         onUsageUnavailable?()
         generation = UUID()
         helperBuild = nil; proxyBuild = nil; proxyProtocol = nil
+        auxiliaryCount = nil; auxiliaryLimit = nil
         diagnosticsFromPreviousConnection = !diagnostics.isEmpty
         let owned = child; child = nil
         try? input?.fileHandleForWriting.close(); input = nil
@@ -435,8 +469,13 @@ struct ProxyDiagnostic: Identifiable {
     var id: String { scope }
     var scopeLabel: String { scope == "root" ? "메인 대화" : "보조 작업" }
     static let descriptions: [String: (String, String)] = [
+        "request_body_timeout": ("요청 본문 수신 시간이 초과됐습니다", "CLI 연결 상태를 확인한 뒤 새 지시를 입력하세요. 중단된 요청은 자동으로 다시 보내지 않습니다."),
+        "request_too_large": ("요청이 4 MiB 제한을 초과했습니다", "이미지나 도구 결과 크기를 줄이고 새 지시를 입력하세요."),
+        "request_unreadable": ("요청 본문을 끝까지 받지 못했습니다", "CLI 연결 상태를 확인하고 새 지시를 입력하세요."),
+        "credential_store_unavailable": ("계정 인증 저장소를 읽거나 저장하지 못했습니다", "macOS Keychain 접근 상태를 확인하세요. 기존 대화를 지울 필요는 없습니다."),
+        "auxiliary_capacity_reached": ("보조 작업 기록 한도에 도달했습니다", "일반 재시작으로 한도가 초기화되지 않습니다. 모든 작업을 마친 뒤 README의 새 연결 준비 절차를 진행하세요."),
         "history_owner_unavailable": ("이전 이력의 인증 신원이 다릅니다", "CLI 작업을 마치고 새 지시를 입력하세요. 같은 오류가 반복되면 이전 암호화 이력을 사용하지 않는 새 대화가 필요합니다."),
-        "compaction_owner_unavailable": ("암호화 압축 이력의 소유권을 확인할 수 없습니다", "재로그인·토큰 갱신·구버전 이력 때문일 수 있습니다. 기존 기록을 보존하고 새 대화로 시작하세요."),
+        "compaction_owner_unavailable": ("암호화 압축 이력의 소유권을 확인할 수 없습니다", "재로그인·확인되지 않은 인증 변경·구버전 이력 때문일 수 있습니다. 기존 기록을 보존하고 새 대화로 시작하세요."),
         "auxiliary_credential_changed": ("보조 작업의 인증이 변경됐습니다", "중단된 작업을 재전송하지 말고 새 리뷰 또는 새 보조 작업을 명시적으로 시작하세요."),
         "authentication_expired": ("인증이 만료됐거나 갱신이 필요합니다", "모든 작업을 마친 뒤 해당 계정에 다시 로그인하세요. 실패한 요청은 자동으로 다시 보내지 않습니다."),
         "account_unavailable": ("사용 가능한 계정을 확인할 수 없습니다", "계정 등록 상태와 사용량을 확인하세요."),

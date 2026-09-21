@@ -45,10 +45,11 @@ type Runner interface {
 	Run(context.Context, string, func()) error
 }
 type record struct {
-	Slot           string      `json:"slot"`
-	Credentials    Credentials `json:"credentials"`
-	RefreshBlocked bool        `json:"refresh_blocked,omitempty"`
-	Registration   string      `json:"registration,omitempty"`
+	Slot           string          `json:"slot"`
+	Credentials    Credentials     `json:"credentials"`
+	RefreshBlocked bool            `json:"refresh_blocked,omitempty"`
+	Registration   string          `json:"registration,omitempty"`
+	History        *historyBinding `json:"history,omitempty"`
 }
 type registry struct {
 	Version  int      `json:"version"`
@@ -63,10 +64,12 @@ type Status struct {
 
 // Callers must additionally hold the application process lock for mutations.
 type Manager struct {
-	mu         sync.Mutex
-	vault      credentialstore.Vault
-	tempParent string
-	refresher  Refresher
+	operationMu sync.Mutex // Credential mutations serialize; local reads stay available during OAuth.
+	mu          sync.Mutex
+	refreshSlot string // guarded by mu; the durable blocked marker remains authoritative on restart
+	vault       credentialstore.Vault
+	tempParent  string
+	refresher   Refresher
 }
 
 func New(v credentialstore.Vault, tempParent string) *Manager {
@@ -140,6 +143,8 @@ func (m *Manager) Status() ([]Status, error) {
 // Logout forgets one slot only. The caller holds the account operation lock
 // and invalidates that slot's routing before replacing credentials.
 func (m *Manager) Logout(slot string) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validSlot(slot) {
@@ -195,11 +200,12 @@ type Access struct {
 	ExpiresAt        time.Time
 	UserID           string `json:"-"`
 	Registration     string `json:"-"`
+	history          *historyBinding
 }
 
 func (r record) access() Access {
 	return Access{Token: r.Credentials.AccessToken, AccountID: r.Credentials.AccountID,
-		ExpiresAt: r.Credentials.ExpiresAt, UserID: r.Credentials.UserID, Registration: r.Registration}
+		ExpiresAt: r.Credentials.ExpiresAt, UserID: r.Credentials.UserID, Registration: r.Registration, history: r.History}
 }
 
 func (Access) String() string   { return "[redacted access]" }
@@ -214,6 +220,8 @@ func (m *Manager) Reauthenticate(ctx context.Context, slot string, runner Runner
 }
 
 func (m *Manager) login(ctx context.Context, slot string, runner Runner, report func(State), replace bool) (err error) {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if report == nil {
@@ -319,6 +327,7 @@ func (m *Manager) login(ctx context.Context, slot string, runner Runner, report 
 		r.Accounts[index].Credentials = c
 		r.Accounts[index].RefreshBlocked = false
 		r.Accounts[index].Registration = rand.Text()
+		r.Accounts[index].History = nil
 	} else {
 		r.Accounts = append(r.Accounts, record{Slot: slot, Credentials: c, Registration: rand.Text()})
 	}

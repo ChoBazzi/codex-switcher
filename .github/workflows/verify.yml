@@ -1,0 +1,31 @@
+name: macOS verification
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install tested CLI and search tool
+        run: |
+          npm install --global @openai/codex@0.155.1
+          command -v rg || brew install ripgrep
+          codex --version
+      - name: Verify synthetic Go, CLI and macOS checks
+        run: sh macos/Checks/verify.sh

@@ -6,6 +6,8 @@
 
 2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
 
+2026-09-21: [ADR 0065](0065-proxy-responsiveness-and-verification.md)에 따라 mutation 잠금과 로컬 조회 잠금을 분리한다. OAuth 대기 중에도 로컬 조회를 허용하며 mutation·프로세스 간 lock과 실패 marker는 저장 완료까지 유지한다.
+
 ## 결정
 
 앱 프록시의 사용량 조회와 실제 모델 dispatch에서 `RequestAccess`를 사용한다. 만료까지 2분 이하이면 helper가 OAuth refresh exchange를 한 번 수행한다. `Access`, `Status`, 계정 선택 및 등록 상태 확인은 로컬 읽기로 유지한다. 별도 `usage`/legacy `exec` 명령에는 갱신 권한을 추가하지 않는다.
@@ -21,7 +23,7 @@
 
 ## 한계
 
-일시적인 네트워크 실패도 자동 갱신 반복 대신 재로그인을 요구한다. 서버가 refresh token을 이미 소비했는지 알 수 없기 때문이다. CLI 텍스트 압축 경로는 그대로 유지한다. ADR 0049의 native 암호화 압축은 토큰 해시에 고정되므로 갱신 뒤 기존 opaque 항목의 소유권 검증이 실패할 수 있다. 이를 임의로 다른 토큰/계정 소유로 바꾸지 않으며 필요하면 새 대화를 사용한다.
+일시적인 네트워크 실패도 자동 갱신 반복 대신 재로그인을 요구한다. 서버가 refresh token을 이미 소비했는지 알 수 없기 때문이다. CLI 텍스트 압축 경로는 그대로 유지한다. [ADR 0064](0064-verified-refresh-history-continuity.md)에 따라 동일 신원을 검증한 갱신은 새 토큰과 이력 소유권 연결을 Keychain에 함께 저장한다. 검증되지 않은 변경으로 기존 opaque 항목의 소유권을 이전하지 않는다. 실제 서비스의 갱신 후 암호화 이력 호환성은 별도 검증한다.
 
 ## 검증
 

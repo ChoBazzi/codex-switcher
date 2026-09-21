@@ -99,6 +99,8 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if m.refresher == nil {
 		return m.Access(slot, now)
 	}
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validSlot(slot) {
@@ -170,7 +172,15 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	next, err := m.refresher.Refresh(ctx, old)
+	// Keep mutation and interprocess locks through commit, but do not hold the
+	// local-read mutex over network I/O. Other requests join via operationMu.
+	m.refreshSlot = slot
+	next, err := func() (Credentials, error) {
+		m.mu.Unlock()
+		defer m.mu.Lock()
+		return m.refresher.Refresh(ctx, old)
+	}()
+	m.refreshSlot = ""
 	if err != nil {
 		return Access{}, ErrRefresh
 	}
@@ -183,7 +193,9 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if err != nil || !sameIdentity(old, next) || !next.ExpiresAt.After(time.Now().Add(2*time.Minute)) {
 		return Access{}, ErrRefresh
 	}
+	owner := r.Accounts[i].access().HistoryCredential()
 	r.Accounts[i].Credentials = next
+	r.Accounts[i].History = &historyBinding{Owner: owner, Current: r.Accounts[i].access().credentialDigest()}
 	r.Accounts[i].RefreshBlocked = false
 	if err = save(); err != nil {
 		return Access{}, err

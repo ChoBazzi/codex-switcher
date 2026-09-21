@@ -10,6 +10,9 @@ import (
 )
 
 func probeAccessError(err error) error {
+	if errors.Is(err, accounts.ErrStore) {
+		return proxy.ErrCredentialStore
+	}
 	if errors.Is(err, accounts.ErrExpired) {
 		return proxy.ErrAuthenticationExpired
 	}
@@ -17,6 +20,19 @@ func probeAccessError(err error) error {
 		return proxy.ErrAccountUnavailable
 	}
 	return err
+}
+
+func probeAuthenticationRejection(err error) (int, string) {
+	switch probeAccessError(err) {
+	case proxy.ErrAuthenticationExpired:
+		return 401, "authentication_expired"
+	case proxy.ErrAccountUnavailable:
+		return 401, "account_unavailable"
+	case proxy.ErrCredentialStore:
+		return 503, "credential_store_unavailable"
+	default:
+		return 401, "session_unavailable"
+	}
 }
 
 // Explicit allowlist: never copy headers, error text, IDs, paths or payloads.
@@ -28,7 +44,7 @@ func diagnosticCategory(code string) string {
 		return code
 	case "auxiliary_credential_changed":
 		return code
-	case "authentication_expired", "account_unavailable", "session_unavailable":
+	case "authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable", "request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached":
 		return code
 	case "probe_identity_invalid":
 		return "cli_identity_invalid"
