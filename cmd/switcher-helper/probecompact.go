@@ -67,19 +67,3 @@ func (owners probeCompactRegistry) accept(body []byte, slot string, credential [
 	}
 	return nil
 }
-
-func probeCompactItems(body []byte) []map[string]json.RawMessage {
-	var p struct {
-		Input []map[string]json.RawMessage `json:"input"`
-	}
-	if json.Unmarshal(body, &p) != nil {
-		return nil
-	}
-	var items []map[string]json.RawMessage
-	for _, item := range p.Input {
-		if probeString(item, "type") == "compaction" {
-			items = append(items, item)
-		}
-	}
-	return items
-}

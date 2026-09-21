@@ -19,8 +19,12 @@ func probeUserBoundary(body []byte) ([32]byte, bool) {
 	if json.Unmarshal(body, &p) != nil {
 		return [32]byte{}, false
 	}
-	for i := len(p.Input) - 1; i >= 0; i-- {
-		item := p.Input[i]
+	return probeItemsUserBoundary(p.Input)
+}
+
+func probeItemsUserBoundary(items []map[string]json.RawMessage) ([32]byte, bool) {
+	for i := len(items) - 1; i >= 0; i-- {
+		item := items[i]
 		if probeString(item, "role") != "user" || (probeString(item, "type") != "" && probeString(item, "type") != "message") {
 			continue
 		}

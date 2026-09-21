@@ -126,8 +126,9 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		previous = a.binding.Slot
 	}
 	mu.Unlock()
-	boundary, _ := probeUserBoundary(body)
-	body, err = probeToolBodyWithOwnership(body, a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
+	parsedInput := parseProbeToolInput(body)
+	boundary, _ := probeItemsUserBoundary(parsedInput.items)
+	body, err = parsedInput.normalize(a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return a.reasoning.permits(item, a.credential)

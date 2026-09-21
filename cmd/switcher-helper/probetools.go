@@ -17,11 +17,9 @@ func probeToolBody(body []byte, slot, previousSlot, salt string) ([]byte, error)
 // Called only on a normalized, validated body. These items retain opaque state
 // or original call IDs and require another ownership check at actual dispatch,
 // since RequestAccess may refresh credentials after local body validation.
-func probeNeedsTurnOwner(body []byte) bool {
-	var p struct{ Input []map[string]json.RawMessage }
-	_ = json.Unmarshal(body, &p)
+func probeItemsNeedTurnOwner(items []map[string]json.RawMessage) bool {
 	needsOwner := false
-	for _, item := range p.Input {
+	for _, item := range items {
 		kind := probeString(item, "type")
 		if (kind == "message" || kind == "") && probeString(item, "role") == "user" {
 			needsOwner = false
@@ -34,17 +32,54 @@ func probeNeedsTurnOwner(body []byte) bool {
 	return needsOwner
 }
 
+// Request-local decoded input; never cached across requests or checkpointed.
+// normalize mutates item IDs, so boundary/compact metadata is read beforehand.
+type probeToolInput struct {
+	fields         map[string]json.RawMessage
+	items          []map[string]json.RawMessage
+	parseErr       error
+	needsTurnOwner bool
+}
+
+func parseProbeToolInput(body []byte) *probeToolInput {
+	d := &probeToolInput{}
+	if json.Unmarshal(body, &d.fields) != nil || d.fields == nil {
+		d.fields = nil
+		d.parseErr = &probeBodyError{Reason: "invalid_json_object", Item: -1, Part: -1}
+		return d
+	}
+	if json.Unmarshal(d.fields["input"], &d.items) != nil || d.items == nil {
+		d.items = nil
+		d.parseErr = &probeBodyError{Reason: "input_not_message_array", Item: -1, Part: -1}
+	}
+	return d
+}
+
+func (d *probeToolInput) compactItems() []map[string]json.RawMessage {
+	var items []map[string]json.RawMessage
+	for _, item := range d.items {
+		if probeString(item, "type") == "compaction" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func probeToolBodyWithCompaction(body []byte, slot, previousSlot, salt string, allow func(map[string]json.RawMessage) bool) ([]byte, error) {
 	return probeToolBodyWithOwnership(body, slot, previousSlot, salt, allow, nil)
 }
 
 func probeToolBodyWithOwnership(body []byte, slot, previousSlot, salt string, allow, reasoning func(map[string]json.RawMessage) bool) ([]byte, error) {
+	return parseProbeToolInput(body).normalize(slot, previousSlot, salt, allow, reasoning)
+}
+
+func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reasoning func(map[string]json.RawMessage) bool) ([]byte, error) {
 	bad := func(reason string, i int) ([]byte, error) {
 		return nil, &probeBodyError{Reason: reason, Item: i, Part: -1}
 	}
-	var p map[string]json.RawMessage
-	if json.Unmarshal(body, &p) != nil || p == nil {
-		return bad("invalid_json_object", -1)
+	p := d.fields
+	if p == nil {
+		return nil, d.parseErr
 	}
 	for _, key := range []string{"previous_response_id", "conversation"} {
 		if raw, ok := p[key]; ok && string(bytes.TrimSpace(raw)) != "null" && string(raw) != `""` {
@@ -52,10 +87,11 @@ func probeToolBodyWithOwnership(body []byte, slot, previousSlot, salt string, al
 		}
 		delete(p, key)
 	}
-	var items []map[string]json.RawMessage
-	if json.Unmarshal(p["input"], &items) != nil || items == nil {
-		return bad("input_not_message_array", -1)
+	if d.parseErr != nil {
+		return nil, d.parseErr
 	}
+	items := d.items
+
 	lastUser := -1
 	for i, item := range items {
 		if probeString(item, "role") == "user" && (probeString(item, "type") == "message" || probeString(item, "type") == "") {
@@ -82,8 +118,7 @@ func probeToolBodyWithOwnership(body []byte, slot, previousSlot, salt string, al
 			continue // Keep the opaque canonical item intact, including its ID.
 		case "", "message":
 			// Reuse the strict text/phase contract without changing tool config.
-			one, _ := json.Marshal(map[string]any{"input": []any{item}})
-			if _, err := probeTextBody(one); err != nil {
+			if err := probeTextMessage(item, i); err != nil {
 				return bad("message_shape_unsupported", i)
 			}
 			if !probeMessageText(item["content"]) {
@@ -168,6 +203,7 @@ func probeToolBodyWithOwnership(body []byte, slot, previousSlot, salt string, al
 	if raw, ok := p["additional_tools"]; ok && !probeToolDefinitions(raw) {
 		return bad("tool_declaration_unsupported", -1)
 	}
+	d.needsTurnOwner = probeItemsNeedTurnOwner(result)
 	p["input"], _ = json.Marshal(result)
 	return json.Marshal(p)
 }

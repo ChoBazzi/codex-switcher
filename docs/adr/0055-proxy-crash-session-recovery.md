@@ -6,6 +6,8 @@
 
 2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
 
+2026-09-21: [ADR 0066](0066-request-preparation-performance.md)은 변경 없는 checkpoint 비교에 기존 소유권 registry를 재사용한다. 동기 저장 시점·fsync·저장 실패 차단과 checkpoint 형식은 유지한다.
+
 ## 배경과 선택지
 
 독립 daemon은 앱 종료에는 살아 있지만, daemon 자체가 종료되면 임시 주소·profile과 메모리의 대화/소유권 상태가 사라졌다. 기존 CLI는 실행 시 읽은 주소를 계속 사용하므로 새 profile을 만드는 것으로는 연결을 복구할 수 없다.

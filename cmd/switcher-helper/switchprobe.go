@@ -69,9 +69,8 @@ func probeTextBody(body []byte) ([]byte, error) {
 	}
 	textItems := make([]map[string]json.RawMessage, 0, len(items))
 	for i, item := range items {
-		var kind, role string
+		var kind string
 		_ = json.Unmarshal(item["type"], &kind)
-		_ = json.Unmarshal(item["role"], &role)
 		if kind == "additional_tools" {
 			// Installed CLI sends tool declarations inside input, not only at
 			// the top level. This experiment disables tools at both locations.
@@ -86,37 +85,10 @@ func probeTextBody(body []byte) ([]byte, error) {
 			}
 			continue
 		}
-		if kind != "" && kind != "message" {
-			return nil, bad("item_type_"+probeCategory(kind), i, -1)
+		if err := probeTextMessage(item, i); err != nil {
+			return nil, err
 		}
-		if role != "user" && role != "assistant" && role != "system" && role != "developer" {
-			return nil, bad("unsupported_role", i, -1)
-		}
-		if raw, exists := item["phase"]; exists {
-			var phase string
-			if role != "assistant" || json.Unmarshal(raw, &phase) != nil || phase != "commentary" && phase != "final_answer" {
-				return nil, bad("message_phase_invalid", i, -1)
-			}
-		}
-		for key := range item {
-			if key != "type" && key != "role" && key != "content" && key != "id" && key != "status" && key != "phase" {
-				return nil, bad("message_field_"+probeCategory(key), i, -1)
-			}
-		}
-		var parts []struct {
-			Type string `json:"type"`
-		}
-		var plain string
-		if json.Unmarshal(item["content"], &plain) != nil {
-			if json.Unmarshal(item["content"], &parts) != nil {
-				return nil, bad("invalid_content_shape", i, -1)
-			}
-			for j, part := range parts {
-				if part.Type != "input_text" && part.Type != "output_text" {
-					return nil, bad("content_type_"+probeCategory(part.Type), i, j)
-				}
-			}
-		}
+
 		delete(item, "id")
 		textItems = append(textItems, item)
 	}
@@ -126,6 +98,45 @@ func probeTextBody(body []byte) ([]byte, error) {
 	delete(p, "additional_tools")
 	p["tool_choice"] = json.RawMessage(`"none"`)
 	return json.Marshal(p)
+}
+
+// Share the existing text contract without serializing each message into a
+// temporary request and decoding it again in the tools path.
+func probeTextMessage(item map[string]json.RawMessage, i int) error {
+	bad := func(reason string, item, part int) error { return &probeBodyError{reason, item, part} }
+	kind, role := probeString(item, "type"), probeString(item, "role")
+	if kind != "" && kind != "message" {
+		return bad("item_type_"+probeCategory(kind), i, -1)
+	}
+	if role != "user" && role != "assistant" && role != "system" && role != "developer" {
+		return bad("unsupported_role", i, -1)
+	}
+	if raw, exists := item["phase"]; exists {
+		var phase string
+		if role != "assistant" || json.Unmarshal(raw, &phase) != nil || phase != "commentary" && phase != "final_answer" {
+			return bad("message_phase_invalid", i, -1)
+		}
+	}
+	for key := range item {
+		if key != "type" && key != "role" && key != "content" && key != "id" && key != "status" && key != "phase" {
+			return bad("message_field_"+probeCategory(key), i, -1)
+		}
+	}
+	var parts []struct {
+		Type string `json:"type"`
+	}
+	var plain string
+	if json.Unmarshal(item["content"], &plain) != nil {
+		if json.Unmarshal(item["content"], &parts) != nil {
+			return bad("invalid_content_shape", i, -1)
+		}
+		for j, part := range parts {
+			if part.Type != "input_text" && part.Type != "output_text" {
+				return bad("content_type_"+probeCategory(part.Type), i, j)
+			}
+		}
+	}
+	return nil
 }
 
 func probeAdmissionCode(identityErr error, busy, failed bool, session, id string) string {
@@ -319,11 +330,11 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			c.Auxiliary = append(c.Auxiliary, a.binding)
 		}
 		sort.Slice(c.Auxiliary, func(i, j int) bool { return c.Auxiliary[i].Thread < c.Auxiliary[j].Thread })
+		if sameProbeCheckpointRegistry(lastCheckpoint, c, compactOwners) {
+			return true
+		}
 		for key, owner := range compactOwners {
 			c.Owners = append(c.Owners, probeCheckpointOwner{key, owner.credential, owner.slot})
-		}
-		if sameProbeCheckpoint(lastCheckpoint, c) {
-			return true
 		}
 		checkpointErr = writeProbeCheckpoint(checkpointDir, c)
 		if checkpointErr != nil {
@@ -767,9 +778,19 @@ X-Switcher-Run = %q
 			http.Error(w, code, status)
 			return
 		}
+		var parsedInput *probeToolInput
+		if *toolsMode {
+			parsedInput = parseProbeToolInput(body)
+		}
 		if err == nil {
 			hash := sha256.Sum256(body)
-			boundary, hasUser := probeUserBoundary(body)
+			var boundary [32]byte
+			var hasUser bool
+			if parsedInput != nil {
+				boundary, hasUser = probeItemsUserBoundary(parsedInput.items)
+			} else {
+				boundary, hasUser = probeUserBoundary(body)
+			}
 			mu.Lock()
 			needsInput := recoveryRequired && (!hasUser || boundary == lastUserBoundary)
 			duplicate := waited && hash == lastBodyHash
@@ -793,7 +814,7 @@ X-Switcher-Run = %q
 		}
 		if err == nil {
 			if *toolsMode {
-				items := probeCompactItems(body)
+				items := parsedInput.compactItems()
 				credential, accessErr := probeHistoryCredential(access, selected)
 				if accessErr != nil {
 					status, code := probeAuthenticationRejection(accessErr)
@@ -804,7 +825,7 @@ X-Switcher-Run = %q
 				if credential == ([32]byte{}) || credential != ownerCredential {
 					owner = ""
 				}
-				body, err = probeToolBodyWithOwnership(body, selected, owner, secret+":"+hex.EncodeToString(credential[:]), func(item map[string]json.RawMessage) bool {
+				body, err = parsedInput.normalize(selected, owner, secret+":"+hex.EncodeToString(credential[:]), func(item map[string]json.RawMessage) bool {
 					mu.Lock()
 					defer mu.Unlock()
 					return compactOwners.permits(item, selected, credential)
@@ -816,7 +837,7 @@ X-Switcher-Run = %q
 				if err == nil {
 					mu.Lock()
 					activeCompactItems = items
-					if probeNeedsTurnOwner(body) {
+					if parsedInput.needsTurnOwner {
 						activeTurnOwner = ownerCredential
 					}
 					if len(items) == 0 {
