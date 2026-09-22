@@ -165,7 +165,7 @@ final class MenuStore: ObservableObject {
     }
 
     func connectAccount(_ account: AccountSnapshot) {
-        guard !demo, !direct.usageRefreshing, !login.busy, !direct.busy, let helper,
+        guard !demo, !direct.usageRefreshing, !login.busy, !direct.allBusy, let helper,
               let command = AccountLogin.command(for: account.state) else { return }
         direct.accountChanged(account.slot, changing: true)
         login.start(helper: helper, slot: account.slot, command: command) { [weak self] in
@@ -174,7 +174,7 @@ final class MenuStore: ObservableObject {
     }
 
     func logoutAccount(_ slot: String) {
-        guard !demo, !direct.usageRefreshing, !login.busy, !direct.busy, let helper else { return }
+        guard !demo, !direct.usageRefreshing, !login.busy, !direct.allBusy, let helper else { return }
         direct.accountChanged(slot, changing: true)
         login.start(helper: helper, slot: slot, command: "logout") { [weak self] in
             self?.direct.accountChanged(slot, changing: false)
@@ -298,6 +298,16 @@ struct MenuPanel: View {
                 Text(store.demo ? "데모" : "사용량 모니터")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if !direct.connections.isEmpty {
+                HStack {
+                    Picker("확인할 연결", selection: Binding(get: { direct.selectedConnection }, set: { direct.chooseConnection($0) })) {
+                        ForEach(direct.connections) { connection in Text(connection.title).tag(connection.id) }
+                    }.disabled(store.demo || !direct.canChooseConnection || login.busy)
+                    Button("새 연결") { direct.addConnection() }
+                        .disabled(store.demo || !direct.canAddConnection || login.busy)
+                        .help("최대 5개 연결에서 각각 별도의 CLI 대화를 실행합니다. 선택은 다른 연결의 작업을 중단하지 않습니다.")
+                }
+            }
             sessionCard
             if !store.demo && !store.sessions.isEmpty {
                 Picker("확인할 세션", selection: $store.selectedSessionID) {
@@ -322,7 +332,7 @@ struct MenuPanel: View {
                     .font(.subheadline)
                 Spacer()
                 Button("계정 추가") { store.addAccount() }
-                    .disabled(store.demo || !direct.ready || direct.busy || login.busy || store.helper == nil || AccountSlots.firstVacancy(in: store.accounts) == nil)
+                    .disabled(store.demo || !direct.ready || direct.allBusy || login.busy || store.helper == nil || AccountSlots.firstVacancy(in: store.accounts) == nil)
             }
             // Cancellation must remain reachable even when the account list is
             // empty, scrolled away, or being refreshed during browser login.
@@ -381,7 +391,7 @@ struct MenuPanel: View {
                     Button("상태·진단") { showingDiagnostics = true }
                     Button(direct.connected ? "대화 재개 명령 복사" : "Codex CLI 연결 명령 복사") {
                         direct.copyCommand(resume: direct.connected)
-                    }.disabled(!direct.ready)
+                    }.disabled(!direct.ready || direct.pending)
                 }
                 if direct.buildWarning != nil {
                     Label("프록시 빌드 확인 필요 · 상태·진단에서 확인하세요", systemImage: "exclamationmark.triangle")
@@ -466,7 +476,7 @@ struct MenuPanel: View {
     private func accountCard(_ account: AccountSnapshot) -> some View {
         let stale = account.isStale(at: store.now)
         let selected = store.demo ? account.slot == "a" : direct.ready && direct.slot == account.slot
-        let canLogout = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
+        let canLogout = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.allBusy
             && account.canLogoutAccount
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -481,7 +491,7 @@ struct MenuPanel: View {
             if !store.demo {
                 if let command = AccountLogin.command(for: account.state), command == "reauth" {
                     Button(command == "login" ? "계정 연결 · 브라우저 로그인" : "다시 로그인") { store.connectAccount(account) }
-                        .disabled(store.helper == nil || direct.usageRefreshing || login.busy || direct.busy)
+                        .disabled(store.helper == nil || direct.usageRefreshing || login.busy || direct.allBusy)
                 }
                 if account.state == "auth_error" {
                     Text("등록 해제를 뜻하지 않습니다. Keychain 접근 승인과 인증 상태를 확인하세요.")
@@ -522,7 +532,7 @@ struct MenuPanel: View {
     }
 
     private func logoutPanel(_ slot: String) -> some View {
-        let allowed = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
+        let allowed = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.allBusy
             && store.accounts.contains { $0.slot == slot && $0.canLogoutAccount }
         return VStack(alignment: .leading, spacing: 6) {
             Text("계정 \(slot.uppercased()) 연결을 해제할까요?").font(.subheadline.weight(.semibold))

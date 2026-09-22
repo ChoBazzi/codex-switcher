@@ -198,6 +198,11 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 }
 
 func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration, checkpointDir string) error {
+	return switchProbeWithSharedUsage(args, input, output, access, upstream, fetcher, interval, cooldown, checkpointDir, nil, true)
+}
+
+// Secondary connections consume the primary's quota observations, never poll.
+func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration, checkpointDir string, sharedUsage *probeUsageCache, usagePrimary bool) error {
 	f := flag.NewFlagSet("switch-probe", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	confirm := f.Bool("allow-live", false, "explicit live-account experiment")
@@ -231,6 +236,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	var mu sync.Mutex
 	var handlers sync.WaitGroup
 	closing := false
+	shutdownPrepared := false
 	slot, session := "a", ""
 	busy, failed := false, false
 	turnPending, previousSlot := false, ""
@@ -249,6 +255,12 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	samples := make([]usage.Snapshot, accountslot.Capacity)
 	for i, slot := range accountslot.All() {
 		samples[i] = usage.Snapshot{Slot: slot, State: "unknown", Stale: true}
+	}
+	quotaSamples := func() []usage.Snapshot {
+		if sharedUsage != nil {
+			return sharedUsage.load()
+		}
+		return samples
 	}
 	var usageEpoch [accountslot.Capacity]uint64
 	var accountChanging [accountslot.Capacity]bool
@@ -354,13 +366,16 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		report(map[string]any{"event": "usage_refresh", "request_id": id, "status": status, "succeeded": succeeded})
 	}
 	publishUsage := func() {
+		if sharedUsage != nil && usagePrimary {
+			sharedUsage.store(samples)
+		}
 		aged := make([]usage.Snapshot, len(samples))
 		for i, s := range samples {
 			aged[i] = s.At(time.Now())
 		}
 		report(map[string]any{"event": "usage_snapshot", "interval_seconds": 60, "accounts": aged})
 	}
-	if *automatic {
+	if *automatic && usagePrimary {
 		if fetcher == nil {
 			client := usage.NewClient()
 			defer client.Close()
@@ -440,6 +455,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			authentication = source.AuthenticationStatus()
 		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending || auxActive(), "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
+			"conversation":    session,
 			"authentication":  authentication,
 			"auxiliary_count": len(auxiliary), "auxiliary_limit": probeAuxiliaryLimit,
 			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending && !auxActive(),
@@ -566,7 +582,7 @@ X-Switcher-Run = %q
 	}()
 	server := probeHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		if closing {
+		if closing || shutdownPrepared {
 			mu.Unlock()
 			http.Error(w, "proxy_service_stopping", 503)
 			return
@@ -586,7 +602,7 @@ X-Switcher-Run = %q
 		id, root, identityErr := cliidentity.Conversation(r.Header)
 		if *toolsMode && identityErr == nil && id != root {
 			mu.Lock()
-			if closing {
+			if closing || shutdownPrepared {
 				mu.Unlock()
 				http.Error(w, "proxy_service_stopping", 503)
 				return
@@ -606,7 +622,7 @@ X-Switcher-Run = %q
 					return
 				}
 				if *automatic && !chosen {
-					next, reason := probeQuotaSelection("", samples, time.Now())
+					next, reason := probeQuotaSelection("", quotaSamples(), time.Now())
 					if next == "" {
 						mu.Unlock()
 						report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": reason})
@@ -623,7 +639,7 @@ X-Switcher-Run = %q
 			}
 			mu.Unlock()
 			a.serve(w, r, &mu, access, upstream, secret, func() bool { revision++; state("probe_state", false); return checkpointErr == nil }, func() error {
-				if closing || checkpointErr != nil {
+				if closing || shutdownPrepared || checkpointErr != nil {
 					return errCheckpoint
 				}
 				if turnLease == nil {
@@ -641,7 +657,7 @@ X-Switcher-Run = %q
 		}
 		id, err := cliidentity.ThreadID(r.Header)
 		mu.Lock()
-		if closing {
+		if closing || shutdownPrepared {
 			mu.Unlock()
 			http.Error(w, "proxy_service_stopping", 503)
 			return
@@ -703,7 +719,7 @@ X-Switcher-Run = %q
 			if chosen {
 				current = slot
 			}
-			next, reason := probeQuotaSelection(current, samples, time.Now())
+			next, reason := probeQuotaSelection(current, quotaSamples(), time.Now())
 			if next != "" && opaqueSlot != "" && next != opaqueSlot {
 				next, reason = "", "probe_compaction_account_pinned"
 			}
@@ -966,10 +982,22 @@ X-Switcher-Run = %q
 					mu.Unlock()
 					continue
 				}
+				if command.Action == "prepare_shutdown" {
+					shutdownPrepared = !busy && !waiting && !turnPending && !auxActive() && checkpointErr == nil
+					state("probe_shutdown_prepared", shutdownPrepared)
+					mu.Unlock()
+					continue
+				}
+				if command.Action == "abort_shutdown" {
+					shutdownPrepared = false
+					state("probe_shutdown_aborted", true)
+					mu.Unlock()
+					continue
+				}
 				if command.Action == "status" {
 					// A UI may disappear before its account_changed notification. Once the
 					// credential operation lock is free, reconcile pending slots locally.
-					if owner, ok := access.(interface{ AccountsIdle() bool }); ok && owner.AccountsIdle() {
+					if owner, ok := access.(interface{ AccountsIdle() bool }); ok && usagePrimary && owner.AccountsIdle() {
 						changed := false
 						for i, pending := range accountChanging {
 							if pending {
@@ -1068,10 +1096,10 @@ X-Switcher-Run = %q
 						mu.Unlock()
 						continue
 					}
-					target, _ = probeQuotaSelection("", samples, time.Now())
+					target, _ = probeQuotaSelection("", quotaSamples(), time.Now())
 					if opaqueSlot != "" {
 						// Encrypted history must stay with its verified owner.
-						target, _ = probeQuotaSelection(opaqueSlot, samples, time.Now())
+						target, _ = probeQuotaSelection(opaqueSlot, quotaSamples(), time.Now())
 					}
 					command.Slot = target
 				} else if command.Action != "select" {
@@ -1087,7 +1115,7 @@ X-Switcher-Run = %q
 				ok = false
 			}
 			if ok && *automatic {
-				next, _ := probeQuotaSelection(target, samples, time.Now())
+				next, _ := probeQuotaSelection(target, quotaSamples(), time.Now())
 				ok = next == target
 			}
 			if ok {

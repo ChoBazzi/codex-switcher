@@ -147,6 +147,20 @@ func (b *serviceBroker) Write(data []byte) (int, error) {
 		}
 		return len(data), nil
 	}
+	if kind == "connection_list" {
+		var before, after struct {
+			Selected string `json:"selected"`
+		}
+		_ = json.Unmarshal(b.cache[kind], &before)
+		_ = json.Unmarshal(data, &after)
+		if before.Selected != after.Selected {
+			for _, key := range []string{"probe_ready", "probe_state", "diagnostic_root", "diagnostic_auxiliary"} {
+				delete(b.cache, key)
+			}
+			b.diagnostics = nil
+		}
+		b.cache[kind] = append([]byte(nil), data...)
+	}
 	if kind == "probe_ready" || kind == "usage_snapshot" {
 		b.cache[kind] = append([]byte(nil), data...)
 	}
@@ -175,7 +189,7 @@ func (b *serviceBroker) Write(data []byte) (int, error) {
 		return len(data), nil
 	}
 	// Raw diagnostics are never retained; only the explicit summary above is.
-	if b.peer != nil && (kind == "probe_ready" || kind == "probe_state" || kind == "probe_selection" || kind == "probe_abandonment" || kind == "usage_snapshot") {
+	if b.peer != nil && (kind == "connection_list" || kind == "connection_result" || kind == "probe_ready" || kind == "probe_state" || kind == "probe_selection" || kind == "probe_abandonment" || kind == "usage_snapshot") {
 		b.enqueue(b.peer, data)
 	}
 	return len(data), nil
@@ -190,7 +204,7 @@ func (b *serviceBroker) attach(conn net.Conn) {
 		return
 	}
 	b.peer = p
-	for _, key := range []string{"probe_ready", "usage_snapshot", "probe_state", "diagnostic_root", "diagnostic_auxiliary"} {
+	for _, key := range []string{"connection_list", "probe_ready", "usage_snapshot", "probe_state", "diagnostic_root", "diagnostic_auxiliary"} {
 		if data := b.cache[key]; data != nil {
 			b.enqueue(p, data)
 		}
@@ -230,7 +244,7 @@ func (b *serviceBroker) attach(conn net.Conn) {
 		var action string
 		_ = json.Unmarshal(command["action"], &action)
 		switch action {
-		case "status", "usage", "select", "recover", "abandon_turn", "account_changing", "account_changed", "shutdown":
+		case "connection_create", "connection_select", "status", "usage", "select", "recover", "abandon_turn", "account_changing", "account_changed", "shutdown":
 		case "usage_refresh":
 			var id uint64
 			if json.Unmarshal(command["request_id"], &id) != nil || id == 0 {
@@ -310,14 +324,20 @@ func proxyDaemon() error {
 	}
 	return serveProxy(dir, func(input io.Reader, output io.Writer) error {
 		access := accounts.NewRefreshing(credentialstore.New(), filepath.Dir(dir), accounts.NewOAuthRefresher())
-		return switchProbeWithCheckpoint([]string{"--allow-live", "--managed", "--auto", "--tools"}, input, output, access, livetest.Upstream, nil, usage.Interval, 5*time.Second, dir)
+		shared := &multiAccountAccess{Manager: access, turns: sharedTurns{acquire: access.BeginTurn}}
+		return multiProbe(input, output, dir, shared, livetest.Upstream, nil, usage.Interval, 5*time.Second, access.BeginTurn)
 	})
 }
 
 // Explicit maintenance only: never starts a service or retries a stop request.
 func proxyStop() error { return proxyStopSession(false) }
 
-func proxyStopSession(newSession bool) error {
+func proxyStopSession(newSession bool) error { return proxyStopConnection(newSession, "1") }
+
+func proxyStopConnection(newSession bool, connection string) error {
+	if !validConnectionID(connection) {
+		return errDaemon
+	}
 	dir, err := serviceDir()
 	if err != nil {
 		return err
@@ -328,10 +348,33 @@ func proxyStopSession(newSession bool) error {
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if err = json.NewEncoder(conn).Encode(map[string]any{"action": "shutdown", "new_session": newSession}); err != nil {
+	scanner := bufio.NewScanner(conn)
+	if connection != "1" {
+		// An older daemon ignores unknown command fields. Confirm multi-session
+		// capability before asking it to retire anything other than connection 1.
+		if !scanner.Scan() {
+			return errDaemon
+		}
+		var catalog struct {
+			Event       string `json:"event"`
+			Connections []struct {
+				ID string `json:"id"`
+			} `json:"connections"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &catalog) != nil || catalog.Event != "connection_list" {
+			return errors.New("proxy_multi_connection_unavailable")
+		}
+		found := false
+		for _, row := range catalog.Connections {
+			found = found || row.ID == connection
+		}
+		if !found {
+			return errors.New("proxy_connection_unavailable")
+		}
+	}
+	if err = json.NewEncoder(conn).Encode(map[string]any{"action": "shutdown", "new_session": newSession, "connection_id": connection}); err != nil {
 		return errDaemon
 	}
-	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		var event struct {
 			Event    string `json:"event"`

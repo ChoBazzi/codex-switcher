@@ -162,7 +162,72 @@ struct DirectProxyCheck {
         print("PASS: build match/mismatch/legacy protocol, diagnostic redaction, independent root/auxiliary guidance and stale connection labeling")
     }
 
+    private static func multiRelayFixture() {
+        func emit(_ object: [String: Any]) {
+            try! FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: object) + Data([10]))
+        }
+        var selected = "1", count = 1
+        func show() {
+            let rows = (1...count).map { ["id":String($0), "ready":true, "busy":$0 == 1, "failed":false] as [String: Any] }
+            emit(["event":"connection_list", "selected":selected, "connections":rows, "limit":5])
+            emit(["event":"probe_ready", "connection_id":selected, "codex_home":"/synthetic-" + selected])
+            emit(["event":"probe_state", "connection_id":selected, "slot":selected == "1" ? "a" : "b", "busy":selected == "1", "failed":false, "connected":true, "revision":1,
+                  "conversation":"12345678-1234-4234-8234-12345678900" + selected])
+        }
+        show()
+        while let line = readLine(), let data = line.data(using: .utf8),
+              let command = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            switch command["action"] as? String {
+            case "connection_create": count += 1; selected = String(count); show(); emit(["event":"connection_result", "accepted":true])
+            case "connection_select": selected = command["connection_id"] as! String; show(); emit(["event":"connection_result", "accepted":true])
+            case "status":
+                show()
+                // An out-of-date, differently tagged frame must not replace the selection.
+                emit(["event":"probe_state", "connection_id":"5", "slot":"e", "busy":false, "failed":true, "connected":true, "revision":99])
+            case "select":
+                precondition(command["connection_id"] as? String == selected)
+                emit(["event":"probe_selection", "connection_id":selected, "slot":command["slot"]!, "busy":false, "failed":false, "connected":true, "revision":2, "accepted":true])
+            case "shutdown": emit(["event":"probe_shutdown", "accepted":false])
+            default: break
+            }
+        }
+    }
+
+    @MainActor private static func checkMultipleConnections() async throws {
+        setenv("SWITCHER_MULTI_TEST", "1", 1)
+        let store = DirectProxyStore()
+        store.start(helper: URL(fileURLWithPath: CommandLine.arguments[0]))
+        unsetenv("SWITCHER_MULTI_TEST")
+        try await waitFor { store.ready }
+        precondition(store.busy && store.canAddConnection)
+        store.addConnection()
+        try await waitFor { store.ready && !store.pending && store.selectedConnection == "2" }
+        precondition(!store.busy && store.allBusy && store.home == "/synthetic-2" && store.slot == "b")
+        precondition(store.canSelect("c"))
+        precondition(DirectProxyStore.connectionCommand(home: store.home!, resume: true, conversation: store.conversation).hasSuffix("resume 12345678-1234-4234-8234-123456789002"))
+        store.select("c")
+        try await waitFor { !store.pending && store.slot == "c" }
+        store.poll()
+        try await waitFor { store.slot == "b" }
+        precondition(!store.failed && store.selectedConnection == "2" && store.allBusy)
+        store.chooseConnection("1")
+        try await waitFor { !store.pending && store.home == "/synthetic-1" }
+        precondition(store.busy && store.slot == "a")
+        store.chooseConnection("2")
+        try await waitFor { !store.pending && store.home == "/synthetic-2" }
+        var stopped: Bool?
+        store.shutdownService { stopped = $0 }
+        try await waitFor { stopped != nil }
+        precondition(stopped == false && store.ready)
+        store.stop()
+        precondition(store.connections.isEmpty && store.conversation == nil)
+        print("PASS: multiple connection selection, targeted controls, aggregate busy, bound resume, stale-event isolation and shutdown rejection")
+    }
+
     @MainActor static func main() async throws {
+        if CommandLine.arguments.contains("proxy-connect"), ProcessInfo.processInfo.environment["SWITCHER_MULTI_TEST"] == "1" {
+            multiRelayFixture(); return
+        }
         if CommandLine.arguments.contains("proxy-connect") {
             func emit(_ value: [String: Any]) {
                 let data = try! JSONSerialization.data(withJSONObject: value)
@@ -260,6 +325,7 @@ struct DirectProxyCheck {
             return
         }
         checkDiagnostics()
+        try await checkMultipleConnections()
         let authenticationStore = DirectProxyStore()
         authenticationStore.ready = true
         func auth(_ value: [String: Any]) {

@@ -54,6 +54,10 @@ struct MenuLayoutCheck {
         for count in [0, 1, 2, 3, 5] {
             let saved = store.accounts
             store.accounts = Array(saved.prefix(count))
+            if count == 5 {
+                let rows = (1...5).map { ["id":String($0), "ready":true, "busy":$0 == 2, "failed":$0 == 3] as [String: Any] }
+                direct.receiveConnections(try JSONSerialization.data(withJSONObject: ["event":"connection_list", "selected":"1", "connections":rows, "limit":5]))
+            }
             for scheme in [ColorScheme.light, .dark] {
                 let renderer = ImageRenderer(content: MenuPanel(store: store)
                     .background(Color(nsColor: .windowBackgroundColor))

@@ -25,6 +25,42 @@ struct ProxyEventFrames {
 /// Owns a disposable relay. The independent service retains the CLI and proxy.
 @MainActor
 final class DirectProxyStore: ObservableObject {
+    @Published private(set) var connections: [ProxyConnection] = []
+    @Published private(set) var selectedConnection = "1"
+    @Published private(set) var conversation: String?
+    var allBusy: Bool { busy || connections.contains { $0.busy || !$0.ready } }
+    var canAddConnection: Bool { ready && !pending && !stopping && !connections.isEmpty && connections.count < 5 }
+    var canChooseConnection: Bool { ready && !pending && !stopping && !connections.isEmpty }
+
+    func chooseConnection(_ id: String) {
+        guard canChooseConnection, id != selectedConnection, connections.contains(where: { $0.id == id && $0.ready }) else { return }
+        control(["action": "connection_select", "connection_id": id])
+    }
+    func addConnection() {
+        guard canAddConnection else { return }
+        control(["action": "connection_create"])
+    }
+    // The coordinator serializes selection and all observations. Never carry
+    // another conversation's profile, revision, failure or diagnostics across it.
+    @discardableResult func receiveConnections(_ data: Data) -> Bool {
+        struct Event: Decodable { let event: String; let selected: String?; let connections: [ProxyConnection]?; let limit: Int? }
+        guard let e = try? JSONDecoder().decode(Event.self, from: data), e.event == "connection_list" else { return false }
+        guard e.limit == 5, let rows = e.connections, !rows.isEmpty, rows.count <= 5,
+              Set(rows.map(\.id)).count == rows.count, rows.allSatisfy({ ["1", "2", "3", "4", "5"].contains($0.id) }),
+              let selected = e.selected, rows.contains(where: { $0.id == selected }) else {
+            ready = false; connections = []; return true
+        }
+        connections = rows
+        if selected != selectedConnection {
+            selectedConnection = selected
+            ready = false; home = nil; conversation = nil; revision = 0
+            busy = false; failed = false; connected = false; canRecoverCurrent = false; toolWaiting = false
+            auxiliaryCount = nil; auxiliaryLimit = nil; authentication = nil
+            rootDiagnostic = nil; auxiliaryDiagnostic = nil; diagnosticsFromPreviousConnection = false
+            lastRead = .distantPast; waitingStatus = false; uncertain = false
+        }
+        return true
+    }
     @Published var slot = "a"
     @Published var busy = false
     @Published var failed = false
@@ -224,17 +260,27 @@ final class DirectProxyStore: ObservableObject {
 
     private func receive(_ data: Data, run: UUID) {
         guard generation == run else { return }
+        if receiveConnections(data) { return }
+        // Ignore a tagged observation for another connection, even at UI handoff.
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let id = object["connection_id"] as? String, id != selectedConnection { return }
         if receiveDiagnosticEvent(data) { return }
         struct Event: Decodable {
             let event: String
             var slot: String?; var busy: Bool?; var failed: Bool?; var connected: Bool?
             var revision: UInt64?; var accepted: Bool?; var codex_home: String?
+            var conversation: String?
             var can_abandon_turn: Bool?
             var can_recover_current: Bool?
             var request_id: UInt64?; var status: String?; var succeeded: Bool?
             var auxiliary_count: Int?; var auxiliary_limit: Int?
         }
         guard let e = try? JSONDecoder().decode(Event.self, from: data) else { return }
+        if e.event == "connection_result" {
+            pending = false
+            if e.accepted != true { message = "연결 변경 거절 · 현재 상태를 다시 확인하세요" }
+            return
+        }
         if e.event == "probe_shutdown", stopping {
             if e.accepted == true { shutdownAccepted = true }
             else {
@@ -270,6 +316,7 @@ final class DirectProxyStore: ObservableObject {
         guard ["probe_state", "probe_selection", "probe_abandonment"].contains(e.event), let nextSlot = e.slot,
               AccountSlots.all.contains(nextSlot), let nextBusy = e.busy, let nextFailed = e.failed,
               let nextConnected = e.connected, let nextRevision = e.revision else { return }
+        conversation = e.conversation.flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
         slot = nextSlot; busy = nextBusy; failed = nextFailed; connected = nextConnected
         receiveAuthenticationState(data)
         if let count = e.auxiliary_count, let limit = e.auxiliary_limit,
@@ -338,7 +385,9 @@ final class DirectProxyStore: ObservableObject {
 
     @discardableResult
     private func send(_ object: [String: Any]) -> Bool {
-        guard let handle = input?.fileHandleForWriting, let data = try? JSONSerialization.data(withJSONObject: object) else { return false }
+        var command = object
+        if !connections.isEmpty && command["connection_id"] == nil { command["connection_id"] = selectedConnection }
+        guard let handle = input?.fileHandleForWriting, let data = try? JSONSerialization.data(withJSONObject: command) else { return false }
         do { try handle.write(contentsOf: data + Data([10])); return true }
         catch {
             // Detach only our relay; never stop the daemon or replay the command.
@@ -385,15 +434,16 @@ final class DirectProxyStore: ObservableObject {
         send(["action":changing ? "account_changing" : "account_changed", "slot":slot])
     }
 
-    static func connectionCommand(home: String, resume: Bool) -> String {
+    static func connectionCommand(home: String, resume: Bool, conversation: String? = nil) -> String {
         let quoted = "'" + home.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-        return "CODEX_HOME=\(quoted) codex" + (resume ? " resume" : "")
+        let bound = conversation.flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
+        return "CODEX_HOME=\(quoted) codex" + (resume ? " resume" + (bound.map { " " + $0 } ?? "") : "")
     }
 
     func copyCommand(resume: Bool = false) {
-        guard ready, let home else { return }
+        guard ready, !pending, let home else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(Self.connectionCommand(home: home, resume: resume), forType: .string)
+        NSPasteboard.general.setString(Self.connectionCommand(home: home, resume: resume, conversation: conversation), forType: .string)
     }
 
     private func ended(run: UUID) {
@@ -408,6 +458,7 @@ final class DirectProxyStore: ObservableObject {
         finishUsageRead("프록시 연결 전")
         onUsageUnavailable?()
         generation = UUID()
+        connections = []; selectedConnection = "1"; conversation = nil
         helperBuild = nil; proxyBuild = nil; proxyProtocol = nil
         auxiliaryCount = nil; auxiliaryLimit = nil
         authentication = nil
@@ -421,6 +472,14 @@ final class DirectProxyStore: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if owned.isRunning { kill(owned.processIdentifier, SIGKILL) } }
         }
     }
+}
+
+struct ProxyConnection: Decodable, Identifiable {
+    let id: String
+    let ready: Bool
+    let busy: Bool
+    let failed: Bool
+    var title: String { "연결 \(id) · " + (!ready ? "준비 중" : busy ? "작업 중" : failed ? "실패" : "대기") }
 }
 
 struct ProxyAuthentication: Decodable {
