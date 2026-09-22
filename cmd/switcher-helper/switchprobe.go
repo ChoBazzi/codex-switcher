@@ -248,6 +248,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	recoveryRequired := false
 	compactOwners := probeCompactRegistry{}
 	var reasoningOwners probeReasoningOwners
+	var portableBoundary [32]byte
 	var activeCompactItems []map[string]json.RawMessage
 	var activeCredential [32]byte
 	opaqueSlot := ""
@@ -256,11 +257,15 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	for i, slot := range accountslot.All() {
 		samples[i] = usage.Snapshot{Slot: slot, State: "unknown", Stale: true}
 	}
+	limits := &probeLimitState{}
+	if sharedUsage != nil {
+		limits = &sharedUsage.limits
+	}
 	quotaSamples := func() []usage.Snapshot {
 		if sharedUsage != nil {
-			return sharedUsage.load()
+			return limits.apply(sharedUsage.load())
 		}
-		return samples
+		return limits.apply(samples)
 	}
 	var usageEpoch [accountslot.Capacity]uint64
 	var accountChanging [accountslot.Capacity]bool
@@ -514,6 +519,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	}
 	if *toolsMode {
 		h.ValidateCompaction = validateCompact
+		h.DeferUsageLimit = *automatic
 	}
 	defer func() { mu.Lock(); defer mu.Unlock(); h.Close() }()
 	address := "127.0.0.1:0"
@@ -635,6 +641,12 @@ X-Switcher-Run = %q
 					session = root
 				}
 				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}, report: report}
+				if *automatic {
+					a.quotaAlternative = func(tried map[string]bool) string {
+						limits.mark(a.binding.Slot)
+						return probeQuotaAlternative(quotaSamples(), tried, time.Now())
+					}
+				}
 				auxiliary[id] = a
 			}
 			mu.Unlock()
@@ -801,6 +813,7 @@ X-Switcher-Run = %q
 			http.Error(w, code, status)
 			return
 		}
+		originalBody := append([]byte(nil), body...)
 		var parsedInput *probeToolInput
 		if *toolsMode {
 			parsedInput = parseProbeToolInput(body)
@@ -837,6 +850,9 @@ X-Switcher-Run = %q
 		}
 		if err == nil {
 			if *toolsMode {
+				mu.Lock()
+				parsedInput.portable = portableBoundary != ([32]byte{}) && portableBoundary == lastUserBoundary
+				mu.Unlock()
 				items := parsedInput.compactItems()
 				credential, accessErr := probeHistoryCredential(access, selected)
 				if accessErr != nil {
@@ -860,6 +876,9 @@ X-Switcher-Run = %q
 				if err == nil {
 					mu.Lock()
 					activeCompactItems = items
+					if parsedInput.portable {
+						activeTurnOwner = credential
+					}
 					if parsedInput.needsTurnOwner {
 						activeTurnOwner = ownerCredential
 					}
@@ -900,15 +919,85 @@ X-Switcher-Run = %q
 			http.Error(w, "proxy_checkpoint_unavailable", 503)
 			return
 		}
-		r.ContentLength = int64(len(body))
-		turn := &probeTurnWriter{ResponseWriter: w, holdTerminal: *toolsMode, onTerminal: func() { mu.Lock(); terminalReady = true; state("probe_state", false); mu.Unlock() }}
-		attempted = true
-		if *toolsMode && !compact {
-			h.ServeHTTP(turn, r)
-		} else {
-			h.ServeHTTP(w, r)
+		var turn *probeTurnWriter
+		var d proxy.Diagnostics
+		tried := map[string]bool{}
+		for {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			turn = &probeTurnWriter{ResponseWriter: w, holdTerminal: *toolsMode, onTerminal: func() { mu.Lock(); terminalReady = true; state("probe_state", false); mu.Unlock() }}
+			attempted = true
+			tried[selected] = true
+			if *toolsMode && !compact {
+				h.ServeHTTP(turn, r)
+			} else {
+				h.ServeHTTP(w, r)
+			}
+			d = h.Diagnostics()
+			if !d.UsageLimit {
+				break
+			}
+			// No bytes were delivered for this attempt. Only an explicit usage
+			// limit can reach this path; never replay generic errors or streams.
+			mu.Lock()
+			limits.mark(selected)
+			snapshots := quotaSamples()
+			next := probeQuotaAlternative(snapshots, tried, time.Now())
+			allowed := *automatic && *toolsMode && !compact && opaqueSlot == "" && next != "" && !closing && checkpointErr == nil && r.Context().Err() == nil
+			mu.Unlock()
+			if !allowed {
+				writeProbeUsageLimit(w)
+				break
+			}
+			credential, accessErr := probeHistoryCredential(access, next)
+			if accessErr != nil || credential == ([32]byte{}) {
+				writeProbeUsageLimit(w)
+				break
+			}
+			portable := parseProbeToolInput(originalBody)
+			portable.portable = true
+			nextBody, bodyErr := portable.normalize(next, "", secret+":"+hex.EncodeToString(credential[:]), nil, nil)
+			if bodyErr != nil {
+				writeProbeUsageLimit(w)
+				break
+			}
+			replacement, createErr := proxy.New(upstream, resolve)
+			if createErr != nil {
+				writeProbeUsageLimit(w)
+				break
+			}
+			replacement.ValidateCompaction = validateCompact
+			replacement.DeferUsageLimit = true
+			mu.Lock()
+			if closing || checkpointErr != nil || r.Context().Err() != nil {
+				mu.Unlock()
+				replacement.Close()
+				writeProbeUsageLimit(w)
+				break
+			}
+			from := slot
+			slot, selected, chosen = next, next, true
+			portableBoundary = lastUserBoundary
+			activeCompactItems = nil
+			// Portable history contains no opaque state or original call IDs.
+			// Still pin actual dispatch to the authentication we normalized for.
+			activeCredential = [32]byte{}
+			activeTurnOwner = credential
+			revision++
+			state("probe_state", false)
+			stored := checkpointErr == nil
+			mu.Unlock()
+			if !stored {
+				replacement.Close()
+				http.Error(w, "proxy_checkpoint_unavailable", 503)
+				break
+			}
+			h.Close()
+			h = replacement
+			body = nextBody
+			report(map[string]any{"event": "probe_quota_switch", "from": from, "slot": next})
 		}
-		d := h.Diagnostics()
+
 		mu.Lock()
 		failed = d.Status != 200 || d.ResponseFailure != "" || d.Rejection != ""
 		if compact && !failed {
@@ -1135,6 +1224,7 @@ X-Switcher-Run = %q
 					h = next
 					if *toolsMode {
 						h.ValidateCompaction = validateCompact
+						h.DeferUsageLimit = *automatic
 					}
 					failed, recoveryRequired = false, true
 					previousSlot = ""

@@ -61,6 +61,7 @@ func (a *multiAccountAccess) BeginTurn() (io.Closer, error) { return a.turns.beg
 // Synchronous publication: secondary admission reads the latest snapshot,
 // including credential invalidation, without a second poller or delayed queue.
 type probeUsageCache struct {
+	limits  probeLimitState
 	mu      sync.RWMutex
 	samples []usage.Snapshot
 }

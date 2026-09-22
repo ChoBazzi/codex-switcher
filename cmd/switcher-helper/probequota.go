@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
+	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ChoBazzi/codex-switcher/internal/usage"
@@ -56,4 +59,63 @@ func probeQuotaSelection(current string, samples []usage.Snapshot, now time.Time
 		return best, "initial_usage_selection"
 	}
 	return best, "quota_exhausted_switch"
+}
+
+// Exclude every account attempted for this CLI request, even if its cached
+// percentage has not caught up with the explicit upstream exhaustion response.
+func probeQuotaAlternative(samples []usage.Snapshot, tried map[string]bool, now time.Time) string {
+	candidates := make([]usage.Snapshot, 0, len(samples))
+	for _, sample := range samples {
+		if !tried[sample.Slot] {
+			candidates = append(candidates, sample)
+		}
+	}
+	next, _ := probeQuotaSelection("", candidates, now)
+	return next
+}
+func writeProbeUsageLimit(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "usage_limit_reached", "code": "usage_limit_reached", "message": "Usage limit reached; no safe automatic account switch is available."}})
+}
+
+// An explicit model limit outranks quota observations started before that
+// rejection. All connections share this small, nonpersistent overlay.
+type probeLimitState struct {
+	mu       sync.Mutex
+	rejected map[string]time.Time
+}
+
+func (l *probeLimitState) mark(slot string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.rejected == nil {
+		l.rejected = map[string]time.Time{}
+	}
+	l.rejected[slot] = time.Now()
+}
+func (l *probeLimitState) apply(samples []usage.Snapshot) []usage.Snapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result := append([]usage.Snapshot(nil), samples...)
+	for i, s := range result {
+		at, limited := l.rejected[s.Slot]
+		if !limited {
+			continue
+		}
+		if s.LastAttempt.After(at) && !s.Stale && s.Usage != nil && (s.State == "ok" || s.State == "limit_reached") {
+			delete(l.rejected, s.Slot)
+			continue
+		}
+		denied, reached, remaining := false, true, 0.0
+		result[i].State = "limit_reached"
+		result[i].Usage = &usage.Data{Allowed: &denied, LimitReached: &reached, RemainingPercent: &remaining}
+		// This is a local observation of exhaustion, not permission to use an
+		// unknown or stale alternative. Selection still validates alternatives.
+		now := time.Now()
+		result[i].LastSuccess = &now
+		result[i].Stale = false
+	}
+	return result
 }

@@ -39,6 +39,7 @@ type probeToolInput struct {
 	items          []map[string]json.RawMessage
 	parseErr       error
 	needsTurnOwner bool
+	portable       bool
 }
 
 func parseProbeToolInput(body []byte) *probeToolInput {
@@ -111,7 +112,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 		}
 		switch kind {
 		case "compaction":
-			if allow == nil || !allow(item) {
+			if d.portable || allow == nil || !allow(item) {
 				return bad("compaction_owner_unavailable", i)
 			}
 			result = append(result, item)
@@ -147,7 +148,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 				return bad("tool_call_duplicate_or_missing", i)
 			}
 			seen[call], pending[call] = true, kind
-			if i < lastUser {
+			if i < lastUser || d.portable {
 				item["call_id"] = probePortableCall(salt, slot, call)
 			}
 		case "function_call_output", "custom_tool_call_output":
@@ -159,7 +160,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 				return bad("tool_output_orphan_or_duplicate", i)
 			}
 			delete(pending, call)
-			if i < lastUser {
+			if i < lastUser || d.portable {
 				item["call_id"] = probePortableCall(salt, slot, call)
 			}
 		case "reasoning":
@@ -173,7 +174,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 			if raw, exists := item["encrypted_content"]; exists && string(raw) != "null" && !probeHasString(item, "encrypted_content") {
 				return bad("reasoning_shape_unsupported", i)
 			}
-			if i < lastUser {
+			if i < lastUser || d.portable {
 				continue
 			} // Completed earlier turn; never export opaque state.
 			if previousSlot == "" || previousSlot != slot {
@@ -188,7 +189,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 		default:
 			return bad("history_type_unsupported", i)
 		}
-		if i > lastUser && (kind == "function_call" || kind == "custom_tool_call" || strings.HasSuffix(kind, "_output")) && previousSlot != slot {
+		if !d.portable && i > lastUser && (kind == "function_call" || kind == "custom_tool_call" || strings.HasSuffix(kind, "_output")) && previousSlot != slot {
 			return bad("tool_turn_owner_unavailable", i)
 		}
 		delete(item, "id")
@@ -203,7 +204,7 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 	if raw, ok := p["additional_tools"]; ok && !probeToolDefinitions(raw) {
 		return bad("tool_declaration_unsupported", -1)
 	}
-	d.needsTurnOwner = probeItemsNeedTurnOwner(result)
+	d.needsTurnOwner = !d.portable && probeItemsNeedTurnOwner(result)
 	p["input"], _ = json.Marshal(result)
 	return json.Marshal(p)
 }

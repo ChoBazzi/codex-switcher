@@ -46,6 +46,8 @@ func diagnosticCategory(code string) string {
 		return code
 	case "authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable", "request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached", "request_canceled":
 		return code
+	case "upstream_usage_limit":
+		return "usage_limit_reached"
 	case "probe_identity_invalid":
 		return "cli_identity_invalid"
 	case "probe_conversation_changed":
@@ -90,6 +92,31 @@ func sanitizedProbeDiagnostic(data []byte) *probeDiagnostic {
 		proxy.Diagnostics
 	}
 	if json.Unmarshal(data, &e) != nil {
+		return nil
+	}
+	if e.Event == "probe_diagnostic" {
+		var d probeDiagnostic
+		if json.Unmarshal(data, &d) != nil || (d.Scope != "root" && d.Scope != "auxiliary") {
+			return nil
+		}
+		at, err := time.Parse(time.RFC3339, d.At)
+		if err != nil || at.UTC().Format(time.RFC3339) != d.At {
+			return nil
+		}
+		// Coordinator summaries cross a second relay boundary. Revalidate
+		// the complete fixed vocabulary; never forward arbitrary summaries.
+		switch d.Code {
+		case "history_owner_unavailable", "compaction_owner_unavailable", "auxiliary_credential_changed",
+			"authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable",
+			"request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached", "request_canceled",
+			"cli_identity_invalid", "conversation_changed", "previous_request_failed", "new_input_required",
+			"auxiliary_compaction_unsupported", "tool_history_incomplete", "history_unsupported", "checkpoint_unavailable",
+			"request_busy", "account_busy", "duplicate_followup", "history_type_unsupported", "message_shape_unsupported",
+			"message_content_unsupported", "agent_message_shape_unsupported", "reasoning_shape_unsupported", "tool_declaration_unsupported",
+			"tool_call_invalid", "tool_output_invalid", "upstream_rate_limited", "upstream_auth_rejected", "response_interrupted",
+			"upstream_rejected", "request_rejected", "usage_limit_reached":
+			return &d
+		}
 		return nil
 	}
 	if e.Event != "probe_blocked" && e.Event != "probe_request_finished" && e.Event != "probe_auxiliary_finished" {

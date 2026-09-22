@@ -19,6 +19,8 @@ import (
 // This prevents replay of interrupted background work without user input.
 type probeAuxiliaryBinding struct{ Thread, Root, Slot string }
 type probeAuxiliary struct {
+	quotaAlternative      func(map[string]bool) string // caller holds the connection mutex
+	portableBoundary      [32]byte
 	binding               probeAuxiliaryBinding
 	handler               *proxy.Handler
 	busy, pending, failed bool
@@ -126,8 +128,12 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		previous = a.binding.Slot
 	}
 	mu.Unlock()
+	originalBody := append([]byte(nil), body...)
 	parsedInput := parseProbeToolInput(body)
 	boundary, _ := probeItemsUserBoundary(parsedInput.items)
+	mu.Lock()
+	parsedInput.portable = a.portableBoundary != ([32]byte{}) && a.portableBoundary == boundary
+	mu.Unlock()
 	body, err = parsedInput.normalize(a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -148,9 +154,8 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		http.Error(w, "probe_tool_history_unsupported", 409)
 		return
 	}
-	mu.Lock()
-	if a.handler == nil {
-		a.handler, err = proxy.New(upstream, func(request *http.Request) (proxy.Identity, error) {
+	makeHandler := func() (*proxy.Handler, error) {
+		next, e := proxy.New(upstream, func(request *http.Request) (proxy.Identity, error) {
 			c, e := usage.RequestAccessContext(request.Context(), access, a.binding.Slot, time.Now())
 			if e != nil {
 				return proxy.Identity{}, probeAccessError(e)
@@ -164,6 +169,14 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 			a.credential = hash
 			return proxy.Identity{Session: a.binding.Thread, Token: c.Token, AccountID: c.AccountID}, nil
 		})
+		if next != nil {
+			next.DeferUsageLimit = a.quotaAlternative != nil
+		}
+		return next, e
+	}
+	mu.Lock()
+	if a.handler == nil {
+		a.handler, err = makeHandler()
 	}
 	h := a.handler
 	mu.Unlock()
@@ -171,10 +184,63 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		reject("probe_auxiliary_unavailable", 503)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	turn := &probeTurnWriter{ResponseWriter: w, holdTerminal: true}
-	h.ServeHTTP(turn, r)
+	var turn *probeTurnWriter
+	tried := map[string]bool{}
+	for {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		turn = &probeTurnWriter{ResponseWriter: w, holdTerminal: true}
+		tried[a.binding.Slot] = true
+		h.ServeHTTP(turn, r)
+		d := h.Diagnostics()
+		if !d.UsageLimit {
+			break
+		}
+		mu.Lock()
+		nextSlot := ""
+		if a.quotaAlternative != nil && r.Context().Err() == nil {
+			nextSlot = a.quotaAlternative(tried)
+		}
+		mu.Unlock()
+		if nextSlot == "" {
+			writeProbeUsageLimit(w)
+			break
+		}
+		credential, accessErr := probeHistoryCredential(access, nextSlot)
+		if accessErr != nil || credential == ([32]byte{}) {
+			writeProbeUsageLimit(w)
+			break
+		}
+		portable := parseProbeToolInput(originalBody)
+		portable.portable = true
+		nextBody, bodyErr := portable.normalize(nextSlot, "", salt+":"+a.binding.Thread, nil, nil)
+		if bodyErr != nil {
+			writeProbeUsageLimit(w)
+			break
+		}
+		replacement, createErr := makeHandler()
+		if createErr != nil {
+			writeProbeUsageLimit(w)
+			break
+		}
+		mu.Lock()
+		a.binding.Slot = nextSlot
+		a.credential = credential
+		a.portableBoundary = boundary
+		stored := changed()
+		mu.Unlock()
+		if !stored {
+			replacement.Close()
+			reject("proxy_checkpoint_unavailable", 503)
+			break
+		}
+		h.Close()
+		h = replacement
+		mu.Lock()
+		a.handler = h
+		mu.Unlock()
+		body = nextBody
+	}
 	d := h.Diagnostics()
 	success = d.Status == 200 && d.ResponseFailure == "" && d.Rejection == "" && turn.valid()
 	mu.Lock()

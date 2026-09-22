@@ -326,6 +326,8 @@ struct DirectProxyCheck {
         }
         checkDiagnostics()
         try await checkMultipleConnections()
+        let quotaDiagnostic = ProxyDiagnostic(scope: "root", code: "usage_limit_reached", at: "2026-09-22T00:00:00Z")
+        precondition(quotaDiagnostic != nil && quotaDiagnostic!.title.contains("자동 전환"))
         let authenticationStore = DirectProxyStore()
         authenticationStore.ready = true
         func auth(_ value: [String: Any]) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChoBazzi/codex-switcher/internal/accounts"
+	"github.com/ChoBazzi/codex-switcher/internal/usage"
 )
 
 type multiHarness struct {
@@ -21,7 +22,7 @@ type multiHarness struct {
 	done   chan error
 }
 
-func startMulti(t *testing.T, dir, upstream string, access probeAccess, fetcher *probeUsageFetcher, guard func() (io.Closer, error)) *multiHarness {
+func startMulti(t *testing.T, dir, upstream string, access probeAccess, fetcher usage.Fetcher, guard func() (io.Closer, error)) *multiHarness {
 	t.Helper()
 	in, commands := io.Pipe()
 	out, sink := io.Pipe()

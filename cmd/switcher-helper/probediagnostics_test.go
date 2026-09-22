@@ -160,3 +160,20 @@ func TestRelayBuildPrecedesLegacyReady(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServiceForwardedQuotaDiagnostic(t *testing.T) {
+	b := &serviceBroker{cache: map[string][]byte{}}
+	b.Write([]byte(`{"event":"probe_diagnostic","scope":"root","code":"usage_limit_reached","at":"2026-09-22T00:00:00Z","secret":"synthetic-secret"}`))
+	if !strings.Contains(string(b.cache["diagnostic_root"]), "usage_limit_reached") || strings.Contains(string(b.cache["diagnostic_root"]), "synthetic-secret") {
+		t.Fatal("coordinator diagnostic lost or leaked")
+	}
+	for _, bad := range []string{
+		`{"event":"probe_diagnostic","scope":"root","code":"synthetic-secret","at":"2026-09-22T00:00:00Z"}`,
+		`{"event":"probe_diagnostic","scope":"synthetic-secret","code":"usage_limit_reached","at":"2026-09-22T00:00:00Z"}`,
+		`{"event":"probe_diagnostic","scope":"root","code":"usage_limit_reached","at":"synthetic-secret"}`,
+	} {
+		if sanitizedProbeDiagnostic([]byte(bad)) != nil {
+			t.Fatal("invalid summary accepted")
+		}
+	}
+}
