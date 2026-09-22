@@ -24,11 +24,13 @@ type probeAuxiliary struct {
 	binding               probeAuxiliaryBinding
 	handler               *proxy.Handler
 	busy, pending, failed bool
+	restored              bool
 	finishing             bool
 	done                  chan struct{}
 	credential            [32]byte
 	lastBody              [32]byte
 	reasoning             probeReasoningOwners
+	agentOwners           *probeAgentOwners
 	report                func(any)
 }
 
@@ -57,6 +59,9 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	}
 	if a.failed || a.busy {
 		code := "probe_previous_request_failed"
+		if a.restored {
+			code = "probe_auxiliary_restart_required"
+		}
 		if a.busy {
 			code = "probe_request_in_progress"
 		}
@@ -134,6 +139,22 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	mu.Lock()
 	parsedInput.portable = a.portableBoundary != ([32]byte{}) && a.portableBoundary == boundary
 	mu.Unlock()
+	// Validate against current authentication before preserving opaque messages;
+	// pin it below so the resolver also checks any dispatch-time refresh/change.
+	var agentCredential [32]byte
+	if a.agentOwners != nil {
+		agentCredential, err = probeHistoryCredential(access, a.binding.Slot)
+		if err != nil {
+			status, code := probeAuthenticationRejection(err)
+			reject(code, status)
+			return
+		}
+		parsedInput.agentOwner = func(content string) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return a.agentOwners.permits(content, agentCredential)
+		}
+	}
 	body, err = parsedInput.normalize(a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -153,6 +174,18 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		}
 		http.Error(w, "probe_tool_history_unsupported", 409)
 		return
+	}
+	if parsedInput.needsAgentOwner {
+		mu.Lock()
+		valid := agentCredential != ([32]byte{}) && (a.credential == ([32]byte{}) || a.credential == agentCredential)
+		if valid {
+			a.credential = agentCredential
+		}
+		mu.Unlock()
+		if !valid {
+			reject("agent_message_owner_unavailable", 409)
+			return
+		}
 	}
 	makeHandler := func() (*proxy.Handler, error) {
 		next, e := proxy.New(upstream, func(request *http.Request) (proxy.Identity, error) {
@@ -246,6 +279,15 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	mu.Lock()
 	if success && !a.reasoning.accept(turn.reasoning, a.credential, boundary) {
 		success = false
+	}
+	if success && a.agentOwners != nil && !a.agentOwners.accept(turn.agentMessages, a.credential) {
+		success = false
+		d.ResponseFailure = "agent_message_owner_unavailable"
+	}
+	// Persist verified outgoing task ownership before the CLI can dispatch it.
+	if success && len(turn.agentMessages) > 0 && !changed() {
+		success = false
+		d.ResponseFailure = "proxy_checkpoint_unavailable"
 	}
 	a.pending = success && turn.pending()
 	a.finishing = success

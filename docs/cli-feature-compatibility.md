@@ -8,6 +8,10 @@
 
 **2026-09-21 호환성 수정:** CLI 0.155.1의 `agent_message` 입력 이력이 `probe_tool_history_unsupported`로 차단되는 경로를 합성 재개로 재현하고 텍스트 형식 지원을 추가했다. item ID는 제거하고 출처·텍스트를 보존하며 실제 사용자 입력 경계와 계정 격리는 유지한다. [ADR 0043](adr/0043-local-tool-history-switching.md) 및 `TestInstalledProbeToolsAgentMessageHistory` 참조. 로컬 기록의 내부 메타데이터는 CLI가 wire에서 생략하므로 임의 메타데이터 통과는 허용하지 않는다.
 
+**2026-09-23 암호화 협업 지시:** [ADR 0072](adr/0072-agent-message-encrypted-attachments.md)에 따라 같은 연결의 성공한 upstream 응답에서 관측했고 현재 인증 소유권이 일치하는 `agent_message`의 암호화 content를 보존한다. 원래 협업 도구 호출의 `message` 인자에도 같은 검사를 적용하고 실제 전송 직전 인증을 다시 확인한다. 소유권이 없으면 `agent_message_owner_unavailable`로 차단하며 지시를 삭제하거나 다른 계정으로 자동 전환하지 않는다. 지원 이전 이력은 새 사용자 입력만으로 해결되지 않을 수 있으므로 새 연결의 새 대화에서 작업 문맥을 인계한다. 기존 이력에서 소유권을 추정해 등록하지 않는다.
+
+CLI 0.155.1에서 신규 소유권 전달·재시작 복원·인증 변경 차단 및 설치 CLI 합성 검사를 통과했고, 해당 변경을 포함한 Xcode 환경의 전체 `macos/Checks/verify.sh`도 통과했다. 실제 계정에서 암호화 지시의 구체적 작업 수행은 아직 미검증이다. 아래 표와 재현 설명은 최초 조사 당시의 결과이며 현재 검증 범위는 위 후속 ADR을 따른다.
+
 검증일: 2026-09-14. 설치 CLI: `codex-cli 0.154.0`, macOS arm64.
 
 ## 확인 결과

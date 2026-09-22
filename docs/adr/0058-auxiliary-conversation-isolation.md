@@ -12,6 +12,8 @@
 
 ## 문제와 결정
 
+2026-09-23: [ADR 0072](0072-agent-message-encrypted-attachments.md)는 검증된 협업 메시지의 인증 소유권 해시를 같은 연결에서 공유해 암호화 작업 지시를 보존한다. 부모의 reasoning 소유권을 자식에게 부여하거나 실패 잠금을 해제하지 않는다. 재시작에서 복원된 보조 작업 거절은 별도 코드로 구분한다.
+
 CLI 0.154.0의 리뷰·서브에이전트·자동 승인 요청은 Thread-Id와 Session-Id가 서로 다른 정상 UUID다. 두 값의 동일성을 강제하면 `probe_identity_invalid`가 발생한다. 기존 대화 handler에 모두 합치는 방식은 도구 이력·실패 상태·계정 소유권을 섞으므로 채택하지 않는다.
 
 `--tools` 앱 경로에서 인증된 보조 대화를 독립 처리한다. 새 `cliidentity.Conversation`은 각 헤더가 정확히 하나의 정상 UUID인지 검사한다. 기존 `ThreadID`의 엄격한 계약은 다른 경로를 위해 유지한다. X-Switcher-Run 인증을 먼저 검사하며, 보조 요청의 Session-Id는 연결의 루트 대화 ID와 같아야 한다. 리뷰가 최초 요청이면 그 Session-Id로 루트를 바인딩한다. 헤더 자체는 인증 수단이 아니며 로컬 연결 capability를 가진 단일 CLI를 신뢰하는 기존 경계다.

@@ -30,6 +30,8 @@
 
 ## 에이전트 간 텍스트 이력 호환성 (2026-09-21)
 
+2026-09-23: [ADR 0072](0072-agent-message-encrypted-attachments.md)는 성공한 협업 응답에서 관측한 메시지의 인증 소유권을 검증해 암호화 작업 지시를 보존한다. 같은 암호문을 담은 협업 도구 인자도 보호하며 reasoning/compaction 소유권은 변경하지 않는다.
+
 설치 CLI 0.155.1에서 합성 로컬 이력을 재개하면 `agent_message` 항목이 Responses 입력에 그대로 포함된다. 기존 도구 이력 파서의 기본 거절 분기로 인해 `history_type_unsupported` 및 HTTP `409 probe_tool_history_unsupported`가 재현됐다. 같은 합성 기록의 `internal_chat_message_metadata_passthrough`는 CLI가 전송 전에 제거하므로 이 메타데이터를 모든 항목에 허용하는 변경은 하지 않는다. 실제 실패 요청 본문과 상세 진단은 보관하지 않았으므로 과거 요청 전체를 재구성한 결과는 아니다.
 
 tools 경로는 `agent_message`의 `type`, 문자열 `author`/`recipient`, `input_text`/문자열 `text`로 구성된 content 배열만 허용하고 item `id`는 제거한다. 출처와 텍스트를 보존하되 author/recipient로 계정·대화 라우팅이나 인증을 결정하지 않는다. 일반 user 메시지로 변환하거나 새 사용자 입력·턴 경계로 취급하지 않는다. reasoning/compaction 소유권 및 도구 호출/결과 쌍 검증은 그대로 유지한다. 이미지·파일·참조·암호화·알 수 없는 추가 필드는 거절한다.

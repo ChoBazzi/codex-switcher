@@ -27,12 +27,13 @@ func TestInstalledProbeToolsAgentMessageHistory(t *testing.T) {
 	if os.Getenv("SWITCHER_CODEX_INTEGRATION") != "1" {
 		t.Skip("synthetic installed CLI opt-in")
 	}
-	for _, includeAgent := range []bool{false, true} {
-		t.Run(fmt.Sprintf("agent_message_%t", includeAgent), func(t *testing.T) {
+	for _, mode := range []string{"plain", "agent_text", "agent_encrypted"} {
+		t.Run(mode, func(t *testing.T) {
+			includeAgent := mode != "plain"
 			home := t.TempDir()
 			fixture := &cliprobe.Upstream{Scenario: "success", MessagePhase: "final_answer"}
 			var mu sync.Mutex
-			var requests, agentItems, metadataItems int
+			var requests, agentItems, metadataItems, encryptedAttachments int
 			var rejection string
 			var wireAgentKeys []string
 			var normalizedAgentPreserved, crossAccountAgentPreserved bool
@@ -49,8 +50,12 @@ func TestInstalledProbeToolsAgentMessageHistory(t *testing.T) {
 					_, hasMetadata := item["internal_chat_message_metadata_passthrough"]
 					var parts []map[string]json.RawMessage
 					_ = json.Unmarshal(item["content"], &parts)
-					return !hasID && !hasMetadata && probeString(item, "author") == "synthetic-child" &&
-						probeString(item, "recipient") == "synthetic-parent" && len(parts) == 1 &&
+					contentOK := len(parts) == 1
+					if mode == "agent_encrypted" {
+						contentOK = len(parts) == 2 && probeString(parts[1], "encrypted_content") == "synthetic-agent-opaque"
+					}
+					return !hasID && !hasMetadata && contentOK && probeString(item, "author") == "synthetic-child" &&
+						probeString(item, "recipient") == "synthetic-parent" &&
 						probeString(parts[0], "type") == "input_text" && probeString(parts[0], "text") == "Synthetic metadata-only history."
 				}
 				return false
@@ -69,6 +74,13 @@ func TestInstalledProbeToolsAgentMessageHistory(t *testing.T) {
 				for _, item := range payload.Input {
 					if probeString(item, "type") == "agent_message" {
 						agentItems++
+						var parts []map[string]json.RawMessage
+						_ = json.Unmarshal(item["content"], &parts)
+						for _, part := range parts {
+							if probeString(part, "type") == "encrypted_content" {
+								encryptedAttachments++
+							}
+						}
 						for key := range item {
 							wireAgentKeys = append(wireAgentKeys, key)
 						}
@@ -78,7 +90,11 @@ func TestInstalledProbeToolsAgentMessageHistory(t *testing.T) {
 						metadataItems++
 					}
 				}
-				normalized, parseErr := probeToolBody(body, "a", "a", "synthetic-salt")
+				parsed := parseProbeToolInput(body)
+				// Fixture-only owner: actual successful-output registration is
+				// covered by TestProbeAgentTaskDispatch.
+				parsed.agentOwner = func(content string) bool { return content == "synthetic-agent-opaque" }
+				normalized, parseErr := parsed.normalize("a", "a", "synthetic-salt", nil, nil)
 				var detail *probeBodyError
 				if errors.As(parseErr, &detail) {
 					rejection = detail.Reason
@@ -87,6 +103,10 @@ func TestInstalledProbeToolsAgentMessageHistory(t *testing.T) {
 					normalizedAgentPreserved = preservesAgent(normalized)
 					otherSlot, otherErr := probeToolBody(body, "b", "a", "synthetic-salt")
 					crossAccountAgentPreserved = otherErr == nil && preservesAgent(otherSlot)
+					if mode == "agent_encrypted" {
+						var blocked *probeBodyError
+						crossAccountAgentPreserved = errors.As(otherErr, &blocked) && blocked.Reason == "agent_message_owner_unavailable"
+					}
 				}
 				mu.Unlock()
 				if parseErr != nil {
@@ -175,6 +195,9 @@ stream_max_retries = 0
 				item["type"], item["id"] = "agent_message", "msg_synthetic_agent"
 				item["author"], item["recipient"] = "synthetic-child", "synthetic-parent"
 				delete(item, "role")
+				if mode == "agent_encrypted" {
+					item["content"] = append(item["content"].([]any), map[string]any{"type": "encrypted_content", "encrypted_content": "synthetic-agent-opaque"})
+				}
 			}
 			record, _ := json.Marshal(map[string]any{"ordinal": nextOrdinal, "timestamp": "2026-09-20T00:00:00Z", "type": "response_item", "payload": item})
 			file, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0600)
@@ -198,6 +221,9 @@ stream_max_retries = 0
 			}
 			if includeAgent && (resumeErr != nil || agentItems != 1 || metadataItems != 0 || rejection != "" || !normalizedAgentPreserved || !crossAccountAgentPreserved) {
 				t.Fatal("agent_message resume or portable text normalization failed")
+			}
+			if mode == "agent_encrypted" && encryptedAttachments != 1 {
+				t.Fatal("installed CLI did not serialize the synthetic encrypted attachment")
 			}
 		})
 	}

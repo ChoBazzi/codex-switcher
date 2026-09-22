@@ -20,7 +20,8 @@ var errCheckpoint = errors.New("proxy_checkpoint_unavailable")
 // No request/response bodies, OAuth credentials or account identifiers are stored.
 // Secret is only the local CLI-to-proxy capability, already present in config.toml.
 type probeCheckpoint struct {
-	Auxiliary                                           []probeAuxiliaryBinding `json:",omitempty"`
+	Auxiliary                                           []probeAuxiliaryBinding     `json:",omitempty"`
+	AgentOwners                                         []probeCheckpointAgentOwner `json:",omitempty"`
 	Retired                                             bool
 	Version                                             int
 	Address, Home, Secret                               string
@@ -78,6 +79,16 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		}
 	}
 	seenAux := map[string]bool{}
+	if len(c.AgentOwners) > probeAgentOwnerLimit {
+		return nil, errCheckpoint
+	}
+	seenAgent := map[probeCheckpointAgentOwner]bool{}
+	for _, owner := range c.AgentOwners {
+		if owner.Message == ([32]byte{}) || owner.Credential == ([32]byte{}) || seenAgent[owner] {
+			return nil, errCheckpoint
+		}
+		seenAgent[owner] = true
+	}
 	if len(c.Auxiliary) > probeAuxiliaryLimit {
 		return nil, errCheckpoint
 	}

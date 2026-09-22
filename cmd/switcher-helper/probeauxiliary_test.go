@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,42 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func TestAuxiliaryAgentEncryptedAttachment(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var p struct{ Input []map[string]json.RawMessage }
+		if json.Unmarshal(body, &p) != nil || len(p.Input) != 2 ||
+			probeString(p.Input[1], "type") != "agent_message" ||
+			!strings.Contains(string(body), "Synthetic child result.") || !strings.Contains(string(body), "synthetic-parent-opaque") {
+			t.Error("auxiliary text or encrypted task not preserved")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_synthetic\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[]}]}}\n\n")
+	}))
+	defer up.Close()
+	var mu sync.Mutex
+	owners := &probeAgentOwners{}
+	credential, err := probeHistoryCredential(syntheticProbeAccess{}, "a")
+	if err != nil || !owners.accept(map[[32]byte]bool{sha256.Sum256([]byte("synthetic-parent-opaque")): true}, credential) {
+		t.Fatal("synthetic ownership setup failed")
+	}
+	a := &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: "synthetic-child", Root: "synthetic-root", Slot: "a"}, agentOwners: owners}
+	defer func() {
+		if a.handler != nil {
+			a.handler.Close()
+		}
+	}()
+	message := strings.Replace(syntheticAgentMessage, `}]}`, `},{"type":"encrypted_content","encrypted_content":"synthetic-parent-opaque"}]}`, 1)
+	body := `{"input":[{"role":"user","content":"inspect"},` + message + `]}`
+	w := httptest.NewRecorder()
+	a.serve(w, httptest.NewRequest("POST", "/responses", strings.NewReader(body)), &mu, syntheticProbeAccess{}, up.URL, "synthetic-salt", func() bool { return true }, nil)
+	if w.Code != 200 || calls.Load() != 1 || a.failed || a.busy || a.pending {
+		t.Fatal("fresh auxiliary with encrypted attachment could not complete")
+	}
+}
 
 func TestAuxiliaryFailureIsolationAndAccountPinning(t *testing.T) {
 	var calls atomic.Int32

@@ -19,6 +19,8 @@ func TestProbeDiagnosticRedaction(t *testing.T) {
 		{`{"event":"probe_blocked","code":"probe_tool_history_unsupported","detail":{"reason":"compaction_owner_unavailable","item_index":99}}`, "compaction_owner_unavailable", "root"},
 		{`{"event":"probe_blocked","code":"probe_tool_history_unsupported","detail":{"reason":"agent_message_shape_unsupported"}}`, "agent_message_shape_unsupported", "root"},
 		{`{"event":"probe_auxiliary_finished","last_http_status":409,"local_rejection_code":"auxiliary_credential_changed"}`, "auxiliary_credential_changed", "auxiliary"},
+		{`{"event":"probe_auxiliary_finished","last_http_status":409,"local_rejection_detail":"agent_message_owner_unavailable"}`, "agent_message_owner_unavailable", "auxiliary"},
+		{`{"event":"probe_auxiliary_finished","last_http_status":409,"code":"probe_auxiliary_restart_required"}`, "auxiliary_restart_required", "auxiliary"},
 		{`{"event":"probe_request_finished","last_http_status":401,"local_rejection_code":"authentication_expired"}`, "authentication_expired", "root"},
 		{`{"event":"probe_request_finished","last_http_status":503,"local_rejection_code":"credential_store_unavailable"}`, "credential_store_unavailable", "root"},
 		{`{"event":"probe_auxiliary_finished","last_http_status":408,"code":"request_body_timeout"}`, "request_body_timeout", "auxiliary"},

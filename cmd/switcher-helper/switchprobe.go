@@ -248,6 +248,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	recoveryRequired := false
 	compactOwners := probeCompactRegistry{}
 	var reasoningOwners probeReasoningOwners
+	agentOwners := &probeAgentOwners{}
 	var portableBoundary [32]byte
 	var activeCompactItems []map[string]json.RawMessage
 	var activeCredential [32]byte
@@ -318,8 +319,13 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	if saved != nil {
 		slot, session, previousSlot = saved.Slot, saved.Session, saved.PreviousSlot
 		previousCredential = saved.PreviousCredential
+		for _, owner := range saved.AgentOwners {
+			if !agentOwners.accept(map[[32]byte]bool{owner.Message: true}, owner.Credential) {
+				return errCheckpoint
+			}
+		}
 		for _, binding := range saved.Auxiliary {
-			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true}
+			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true, restored: true, agentOwners: agentOwners}
 		}
 		chosen, failed = saved.Chosen, saved.Failed || saved.Busy || saved.TurnPending
 		recoveryRequired = saved.RecoveryRequired || session != ""
@@ -343,6 +349,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
 			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
 			LastBody: lastBodyHash, LastUser: lastUserBoundary, PreviousCredential: previousCredential, Revision: revision, OpaqueSlot: opaqueSlot}
+		c.AgentOwners = agentOwners.snapshot()
 		for _, a := range auxiliary {
 			c.Auxiliary = append(c.Auxiliary, a.binding)
 		}
@@ -640,7 +647,7 @@ X-Switcher-Run = %q
 				if session == "" {
 					session = root
 				}
-				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}, report: report}
+				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}, report: report, agentOwners: agentOwners}
 				if *automatic {
 					a.quotaAlternative = func(tried map[string]bool) string {
 						limits.mark(a.binding.Slot)
@@ -864,6 +871,11 @@ X-Switcher-Run = %q
 				if credential == ([32]byte{}) || credential != ownerCredential {
 					owner = ""
 				}
+				parsedInput.agentOwner = func(content string) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					return agentOwners.permits(content, credential)
+				}
 				body, err = parsedInput.normalize(selected, owner, secret+":"+hex.EncodeToString(credential[:]), func(item map[string]json.RawMessage) bool {
 					mu.Lock()
 					defer mu.Unlock()
@@ -881,6 +893,9 @@ X-Switcher-Run = %q
 					}
 					if parsedInput.needsTurnOwner {
 						activeTurnOwner = ownerCredential
+					}
+					if parsedInput.needsAgentOwner {
+						activeTurnOwner = credential
 					}
 					if len(items) == 0 {
 						opaqueSlot = ""
@@ -1009,6 +1024,10 @@ X-Switcher-Run = %q
 			if !failed && !reasoningOwners.accept(turn.reasoning, activeCredential, lastUserBoundary) {
 				failed = true
 				d.ResponseFailure = "probe_reasoning_ownership_unavailable"
+			}
+			if !failed && !agentOwners.accept(turn.agentMessages, activeCredential) {
+				failed = true
+				d.ResponseFailure = "agent_message_owner_unavailable"
 			}
 			turnPending = !failed && turn.pending()
 			if !failed {

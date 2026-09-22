@@ -35,11 +35,13 @@ func probeItemsNeedTurnOwner(items []map[string]json.RawMessage) bool {
 // Request-local decoded input; never cached across requests or checkpointed.
 // normalize mutates item IDs, so boundary/compact metadata is read beforehand.
 type probeToolInput struct {
-	fields         map[string]json.RawMessage
-	items          []map[string]json.RawMessage
-	parseErr       error
-	needsTurnOwner bool
-	portable       bool
+	fields          map[string]json.RawMessage
+	items           []map[string]json.RawMessage
+	parseErr        error
+	needsTurnOwner  bool
+	portable        bool
+	agentOwner      func(string) bool
+	needsAgentOwner bool
 }
 
 func parseProbeToolInput(body []byte) *probeToolInput {
@@ -131,6 +133,16 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 			if !probeAgentMessage(item) {
 				return bad("agent_message_shape_unsupported", i)
 			}
+			var parts []map[string]json.RawMessage
+			_ = json.Unmarshal(item["content"], &parts)
+			for _, part := range parts {
+				if probeString(part, "type") == "encrypted_content" {
+					if d.portable || d.agentOwner == nil || !d.agentOwner(probeString(part, "encrypted_content")) {
+						return bad("agent_message_owner_unavailable", i)
+					}
+					d.needsAgentOwner = true
+				}
+			}
 		case "additional_tools":
 			if !probeKeys(item, "type role id tools") || !probeToolDefinitions(item["tools"]) {
 				return bad("tool_declaration_unsupported", i)
@@ -142,6 +154,14 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 			}
 			if !probeKeys(item, "type id status call_id name namespace "+field) || !probeHasString(item, field) || probeString(item, "name") == "" || !probeCompleted(item) {
 				return bad("tool_call_invalid", i)
+			}
+			// The same opaque payload can also return inside its original tool
+			// arguments. Do not let call-ID remapping export it to another account.
+			if message := probeAgentOutputMessage(item); message != "" {
+				if d.portable || d.agentOwner == nil || !d.agentOwner(message) {
+					return bad("agent_message_owner_unavailable", i)
+				}
+				d.needsAgentOwner = true
 			}
 			call := probeString(item, "call_id")
 			if call == "" || seen[call] {
@@ -294,6 +314,12 @@ func probeAgentMessage(item map[string]json.RawMessage) bool {
 		return false
 	}
 	for _, part := range parts {
+		if probeString(part, "type") == "encrypted_content" {
+			if !probeKeys(part, "type encrypted_content") || !probeHasString(part, "encrypted_content") || probeString(part, "encrypted_content") == "" {
+				return false
+			}
+			continue
+		}
 		if !probeKeys(part, "type text") || probeString(part, "type") != "input_text" || !probeHasString(part, "text") {
 			return false
 		}
