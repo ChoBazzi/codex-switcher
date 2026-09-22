@@ -157,6 +157,9 @@ func (b *serviceBroker) Write(data []byte) (int, error) {
 		}
 		state["event"] = json.RawMessage(`"probe_state"`)
 		delete(state, "accepted")
+		// Authentication activity is transient. Reconnect must await a fresh
+		// status observation rather than resurrecting a completed exchange.
+		delete(state, "authentication")
 		normalized, _ := json.Marshal(state)
 		b.cache["probe_state"] = append(normalized, '\n')
 	}

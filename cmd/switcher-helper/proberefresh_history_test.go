@@ -327,8 +327,14 @@ func TestProbeStatusAvailableDuringRefresh(t *testing.T) {
 	if _, err := io.WriteString(p.commands, "{\"action\":\"shutdown\"}\n"); err != nil {
 		t.Fatal(err)
 	}
-	if p.next(t, "probe_shutdown")["accepted"] != false {
+	shutdown := p.next(t, "probe_shutdown")
+	if shutdown["accepted"] != false {
 		t.Fatal("shutdown interrupted active refresh")
+	}
+	encoded, _ := json.Marshal(shutdown["authentication"])
+	var authentication []accounts.AuthenticationStatus
+	if json.Unmarshal(encoded, &authentication) != nil || len(authentication) != 1 || authentication[0] != (accounts.AuthenticationStatus{Slot: "a", Refreshing: true}) {
+		t.Fatal("status did not report active authentication refresh")
 	}
 	unblock()
 	select {
@@ -338,6 +344,9 @@ func TestProbeStatusAvailableDuringRefresh(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("request did not finish")
+	}
+	if len(source.AuthenticationStatus()) != 0 {
+		t.Fatal("finished request retained authentication activity")
 	}
 }
 

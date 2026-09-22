@@ -433,7 +433,14 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			turnLease.Close()
 			turnLease = nil
 		}
+		var authentication []accounts.AuthenticationStatus
+		if source, ok := access.(interface {
+			AuthenticationStatus() []accounts.AuthenticationStatus
+		}); ok {
+			authentication = source.AuthenticationStatus()
+		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending || auxActive(), "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
+			"authentication":  authentication,
 			"auxiliary_count": len(auxiliary), "auxiliary_limit": probeAuxiliaryLimit,
 			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending && !auxActive(),
 			"can_abandon_turn":    (!busy && !waiting && !auxBusy() && (auxPending() || probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)))})

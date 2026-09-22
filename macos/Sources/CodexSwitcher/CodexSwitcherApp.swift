@@ -437,6 +437,11 @@ struct MenuPanel: View {
             Text(store.demo ? sessionDetail : direct.ready ? direct.message : store.sessionsConnected ? store.selectedSession?.detail ?? "새 CLI 실행을 기다리고 있습니다." : "연결이 끊겨 활성 여부를 확인할 수 없습니다.")
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
+            if !store.demo, let authentication = direct.authenticationMessage {
+                Text(authentication).font(.caption.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(direct.authenticationGuidance ?? "")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -666,6 +671,10 @@ struct ProxyDiagnosticsPanel: View {
             }
             Text(direct.ready ? (direct.busy ? "프록시 연결됨 · 작업 중" : "프록시 연결됨") : "프록시 연결 미확인")
             Text("앱: \(direct.appVersion) · \(direct.auxiliaryCapacityText)")
+            Text(direct.authenticationText)
+            if let guidance = direct.authenticationGuidance {
+                Text(guidance).font(.caption).foregroundStyle(.secondary)
+            }
             Text("연결 시 helper: \(direct.helperBuild.map { String($0.prefix(12)) } ?? "미확인")")
             Text("실행 프록시: \(direct.proxyBuild.map { String($0.prefix(12)) } ?? "미확인")")
             if let warning = direct.buildWarning {

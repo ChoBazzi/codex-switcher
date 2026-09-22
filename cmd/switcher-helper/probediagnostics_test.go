@@ -91,6 +91,18 @@ func TestServiceDiagnosticReconnectAndOriginalCause(t *testing.T) {
 	}
 }
 
+func TestServiceAuthenticationCacheIsTransient(t *testing.T) {
+	b := &serviceBroker{cache: map[string][]byte{}}
+	_, err := b.Write([]byte(`{"event":"probe_state","busy":true,"authentication":[{"slot":"a","waiting":1,"refreshing":true,"canceled":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cached map[string]json.RawMessage
+	if json.Unmarshal(b.cache["probe_state"], &cached) != nil || cached["authentication"] != nil || string(cached["busy"]) != "true" {
+		t.Fatal("cached state retained transient authentication or lost busy guard")
+	}
+}
+
 func TestAuxiliaryDiagnosticFromParser(t *testing.T) {
 	var events [][]byte
 	a := &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: "synthetic-child", Slot: "a"}, report: func(e any) { b, _ := json.Marshal(e); events = append(events, b) }}

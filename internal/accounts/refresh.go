@@ -103,14 +103,16 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 // intent is written, finish the single exchange and commit under its independent
 // timeout before returning cancellation. Never discard rotated credentials.
 func (m *Manager) RequestAccessContext(ctx context.Context, slot string, now time.Time) (Access, error) {
-	a, err := m.requestAccessContext(ctx, slot, now)
+	refreshing, finish := m.authentication.begin(slot, ctx)
+	defer finish()
+	a, err := m.requestAccessContext(ctx, slot, now, refreshing)
 	if ctx.Err() != nil {
 		return Access{}, ctx.Err()
 	}
 	return a, err
 }
 
-func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, now time.Time) (Access, error) {
+func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, now time.Time, refreshing func()) (Access, error) {
 	if err := requestCtx.Err(); err != nil {
 		return Access{}, err
 	}
@@ -196,6 +198,7 @@ func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, 
 		return Access{}, err
 	}
 	r.Accounts[i].RefreshBlocked = true
+	refreshing()
 	if err = save(); err != nil {
 		return Access{}, err
 	}

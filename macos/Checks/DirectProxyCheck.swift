@@ -260,6 +260,38 @@ struct DirectProxyCheck {
             return
         }
         checkDiagnostics()
+        let authenticationStore = DirectProxyStore()
+        authenticationStore.ready = true
+        func auth(_ value: [String: Any]) {
+            authenticationStore.receiveAuthenticationState(try! JSONSerialization.data(withJSONObject: value))
+        }
+        let waiting: [String: Any] = ["slot":"b", "waiting":2, "refreshing":false, "canceled":false]
+        let refreshing: [String: Any] = ["slot":"a", "waiting":1, "refreshing":true, "canceled":false]
+        let canceled: [String: Any] = ["slot":"a", "waiting":0, "refreshing":true, "canceled":true]
+        auth(["authentication":[waiting, refreshing], "token":"synthetic-secret"])
+        precondition(authenticationStore.authenticationMessage!.contains("토큰 갱신 중"))
+        precondition(authenticationStore.authenticationMessage!.contains("계정 B · 인증 대기 중"))
+        precondition(!authenticationStore.diagnosticText.contains("synthetic-secret"))
+        auth(["authentication":[canceled]])
+        precondition(authenticationStore.authenticationMessage!.contains("취소 후 인증 갱신 마무리"))
+        precondition(authenticationStore.authenticationGuidance!.contains("자동으로 다시 보내지 않습니다"))
+        authenticationStore.ready = false
+        precondition(authenticationStore.authenticationMessage == nil && authenticationStore.authenticationText.contains("미확인"))
+        authenticationStore.ready = true
+        for invalid: [String: Any] in [[:], ["authentication":NSNull()], ["authentication":[waiting, waiting]],
+            ["authentication":[["slot":"synthetic-secret", "waiting":1, "refreshing":false, "canceled":false]]],
+            ["authentication":[["slot":"a", "waiting":-1, "refreshing":false, "canceled":false]]],
+            ["authentication":[["slot":"a", "waiting":1, "refreshing":false, "canceled":true]]],
+            ["authentication":"synthetic-secret"]] {
+            auth(invalid)
+            precondition(authenticationStore.authentication == nil && authenticationStore.authenticationMessage == nil)
+        }
+        auth(["authentication":[]])
+        precondition(authenticationStore.authenticationText == "인증 대기·갱신 없음")
+        auth(["authentication":[refreshing]])
+        authenticationStore.stop()
+        precondition(authenticationStore.authentication == nil)
+        print("PASS: authentication waiting/refresh/canceled completion, redaction, invalid and legacy snapshots, disconnect cleanup")
         var frames = ProxyEventFrames()
         let wire = Data("{\"text\":\"합성\"}\n{\"event\":\"probe_state\"}\n".utf8)
         var decoded: [Data] = []

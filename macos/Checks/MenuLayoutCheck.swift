@@ -18,6 +18,13 @@ struct MenuLayoutCheck {
             ["event":"probe_diagnostic", "scope":"root", "code":"compaction_owner_unavailable", "at":"2026-09-21T00:00:00Z"],
             ["event":"probe_diagnostic", "scope":"auxiliary", "code":"auxiliary_credential_changed", "at":"2026-09-21T00:00:00Z"]
         ] { direct.receiveDiagnosticEvent(try JSONSerialization.data(withJSONObject:event)) }
+        direct.receiveAuthenticationState(try JSONSerialization.data(withJSONObject: ["authentication": [
+            ["slot":"a", "waiting":4, "refreshing":true, "canceled":true],
+            ["slot":"b", "waiting":2, "refreshing":false, "canceled":false],
+            ["slot":"c", "waiting":1, "refreshing":false, "canceled":false],
+            ["slot":"d", "waiting":1, "refreshing":false, "canceled":false],
+            ["slot":"e", "waiting":1, "refreshing":false, "canceled":false]
+        ]]))
         for scheme in [ColorScheme.light, .dark] {
             let renderer = ImageRenderer(content: ProxyDiagnosticsPanel(direct: direct, back: {})
                 .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, scheme).fixedSize())

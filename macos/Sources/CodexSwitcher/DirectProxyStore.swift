@@ -43,6 +43,33 @@ final class DirectProxyStore: ObservableObject {
     @Published private(set) var diagnosticsFromPreviousConnection = false
     @Published private(set) var auxiliaryCount: Int?
     @Published private(set) var auxiliaryLimit: Int?
+    @Published private(set) var authentication: [ProxyAuthentication]?
+    var authenticationMessage: String? {
+        guard ready, let authentication, !authentication.isEmpty else { return nil }
+        return authentication.map(\.title).joined(separator: " · ")
+    }
+    var authenticationGuidance: String? {
+        guard authenticationMessage != nil else { return nil }
+        if authentication?.contains(where: { $0.canceled }) == true {
+            return "취소된 요청의 인증 갱신을 안전하게 마무리하고 있습니다. 모델 요청은 자동으로 다시 보내지 않습니다."
+        }
+        return "인증 확인이 끝나면 요청을 진행합니다. 이미 시작한 토큰 갱신은 요청을 취소해도 결과 저장까지 마칩니다."
+    }
+    var authenticationText: String {
+        guard ready, let authentication else { return "인증 상태: 미확인" }
+        return authentication.isEmpty ? "인증 대기·갱신 없음" : authentication.map(\.title).joined(separator: " · ")
+    }
+
+    // Called only for accepted state events after the relay generation check.
+    // Malformed/legacy observations clear the display without altering busy state.
+    func receiveAuthenticationState(_ data: Data) {
+        struct Event: Decodable { let authentication: [ProxyAuthentication]? }
+        guard let event = try? JSONDecoder().decode(Event.self, from: data),
+              let rows = event.authentication, rows.count <= AccountSlots.all.count,
+              Set(rows.map(\.slot)).count == rows.count,
+              rows.allSatisfy({ $0.isValid }) else { authentication = nil; return }
+        authentication = rows.sorted { $0.slot < $1.slot }
+    }
     var auxiliaryCapacityText: String {
         guard let count = auxiliaryCount, let limit = auxiliaryLimit else { return "보조 작업 용량: 미확인" }
         return "보조 작업 기록: \(count)/\(limit) · 새 작업 \(limit - count)개 가능"
@@ -64,7 +91,7 @@ final class DirectProxyStore: ObservableObject {
         let rows = diagnostics.map { "\($0.scopeLabel): \($0.code) · \($0.at)" }
         return (["Codex Switcher \(appVersion)", "연결: \(state)",
                  "연결 시 helper: \(helperBuild ?? "미확인")", "실행 프록시: \(proxyBuild ?? "미확인")",
-                 "프록시 제어 버전: \(proxyProtocol.map(String.init) ?? "미확인")", auxiliaryCapacityText,
+                 "프록시 제어 버전: \(proxyProtocol.map(String.init) ?? "미확인")", auxiliaryCapacityText, authenticationText,
                  diagnosticsFromPreviousConnection ? "오류 기록: 이전 연결" : "오류 기록: 현재 연결"] + rows).joined(separator: "\n")
     }
     func copyDiagnostics() {
@@ -244,6 +271,7 @@ final class DirectProxyStore: ObservableObject {
               AccountSlots.all.contains(nextSlot), let nextBusy = e.busy, let nextFailed = e.failed,
               let nextConnected = e.connected, let nextRevision = e.revision else { return }
         slot = nextSlot; busy = nextBusy; failed = nextFailed; connected = nextConnected
+        receiveAuthenticationState(data)
         if let count = e.auxiliary_count, let limit = e.auxiliary_limit,
            (1...128).contains(limit), (0...limit).contains(count) {
             auxiliaryCount = count; auxiliaryLimit = limit
@@ -270,6 +298,7 @@ final class DirectProxyStore: ObservableObject {
     func poll() {
         guard child != nil, !starting, !stopping else { return }
         if Date().timeIntervalSince(lastRead) > 4 {
+            authentication = nil
             ready = false; message = "프록시 상태 미확인 · 전환 차단"
             if usageRefreshing { finishUsageRead("프록시 연결 미확인 · 사용량 조회 실패") }
             onUsageUnavailable?()
@@ -381,6 +410,7 @@ final class DirectProxyStore: ObservableObject {
         generation = UUID()
         helperBuild = nil; proxyBuild = nil; proxyProtocol = nil
         auxiliaryCount = nil; auxiliaryLimit = nil
+        authentication = nil
         diagnosticsFromPreviousConnection = !diagnostics.isEmpty
         let owned = child; child = nil
         try? input?.fileHandleForWriting.close(); input = nil
@@ -390,6 +420,23 @@ final class DirectProxyStore: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if owned.isRunning { owned.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if owned.isRunning { kill(owned.processIdentifier, SIGKILL) } }
         }
+    }
+}
+
+struct ProxyAuthentication: Decodable {
+    let slot: String
+    let waiting: Int
+    let refreshing: Bool
+    let canceled: Bool
+    var isValid: Bool {
+        AccountSlots.all.contains(slot) && (0...1_000_000).contains(waiting)
+            && (refreshing || waiting > 0) && (!canceled || refreshing)
+    }
+    var title: String {
+        let prefix = "계정 \(slot.uppercased()) · "
+        if canceled { return prefix + "취소 후 인증 갱신 마무리 중" }
+        if refreshing { return prefix + "토큰 갱신 중" + (waiting > 0 ? " (인증 대기 \(waiting)건)" : "") }
+        return prefix + "인증 대기 중 (\(waiting)건)"
     }
 }
 
