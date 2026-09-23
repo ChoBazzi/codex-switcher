@@ -23,6 +23,7 @@ type probeCheckpoint struct {
 	Auxiliary                                           []probeAuxiliaryBinding     `json:",omitempty"`
 	AgentOwners                                         []probeCheckpointAgentOwner `json:",omitempty"`
 	Retired                                             bool
+	Deleted                                             bool `json:",omitempty"`
 	Version                                             int
 	Address, Home, Secret                               string
 	Session, Slot, PreviousSlot                         string
@@ -99,7 +100,7 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		}
 		seenAux[a.Thread] = true
 	}
-	if c.Retired {
+	if c.Retired && !c.Deleted {
 		return nil, nil
 	}
 	return &c, nil

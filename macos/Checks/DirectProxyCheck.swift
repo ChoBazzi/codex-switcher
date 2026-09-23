@@ -167,10 +167,11 @@ struct DirectProxyCheck {
             try! FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: object) + Data([10]))
         }
         var selected = "1", count = 1
+        var deleted = false
         func show() {
             let rows = (1...count).map { ["id":String($0), "ready":true, "busy":$0 == 1, "failed":false] as [String: Any] }
-            emit(["event":"connection_list", "selected":selected, "connections":rows, "limit":5])
-            emit(["event":"probe_ready", "connection_id":selected, "codex_home":"/synthetic-" + selected])
+            emit(["event":"connection_list", "selected":selected, "connections":rows, "limit":5, "can_delete":true])
+            emit(["event":"probe_ready", "connection_id":selected, "codex_home":"/synthetic-" + selected + (deleted && selected == "2" ? "-new" : "")])
             emit(["event":"probe_state", "connection_id":selected, "slot":selected == "1" ? "a" : "b", "busy":selected == "1", "failed":false, "connected":true, "revision":1,
                   "conversation":"12345678-1234-4234-8234-12345678900" + selected])
         }
@@ -180,6 +181,14 @@ struct DirectProxyCheck {
             switch command["action"] as? String {
             case "connection_create": count += 1; selected = String(count); show(); emit(["event":"connection_result", "accepted":true])
             case "connection_select": selected = command["connection_id"] as! String; show(); emit(["event":"connection_result", "accepted":true])
+            case "connection_delete":
+                precondition(command["connection_id"] as? String == "2" && selected == "2")
+                precondition(command["expected_home"] as? String == "/synthetic-2")
+                precondition(command["revision"] as? Int == 1 && !deleted)
+                deleted = true; count = 1; selected = "1"
+                emit(["event":"connection_list", "selected":"", "connections":[], "limit":5, "can_delete":true])
+                show()
+                emit(["event":"connection_result", "action":"connection_delete", "accepted":true])
             case "status":
                 show()
                 // An out-of-date, differently tagged frame must not replace the selection.
@@ -199,7 +208,7 @@ struct DirectProxyCheck {
         store.start(helper: URL(fileURLWithPath: CommandLine.arguments[0]))
         unsetenv("SWITCHER_MULTI_TEST")
         try await waitFor { store.ready }
-        precondition(store.busy && store.canAddConnection)
+        precondition(store.busy && store.canAddConnection && !store.canDeleteConnection)
         store.addConnection()
         try await waitFor { store.ready && !store.pending && store.selectedConnection == "2" }
         precondition(!store.busy && store.allBusy && store.home == "/synthetic-2" && store.slot == "b")
@@ -219,9 +228,24 @@ struct DirectProxyCheck {
         store.shutdownService { stopped = $0 }
         try await waitFor { stopped != nil }
         precondition(stopped == false && store.ready)
+        precondition(store.canDeleteConnection && store.allBusy)
+        let confirmation = store.deletionConfirmation()!
+        store.deleteConnection(confirmation)
+        precondition(store.pending && !store.canDeleteConnection)
+        try await waitFor { !store.pending && store.selectedConnection == "1" }
+        precondition(store.connections.count == 1 && !store.canDeleteConnection && store.home == "/synthetic-1")
+        store.addConnection()
+        try await waitFor { !store.pending && store.selectedConnection == "2" }
+        precondition(store.home == "/synthetic-2-new" && store.canDeleteConnection)
+        store.deleteConnection(confirmation)
+        precondition(!store.pending) // Confirmation belongs to the deleted profile.
+        let legacy: [String: Any] = ["event":"connection_list", "selected":"2", "limit":5,
+            "connections":[["id":"2", "ready":true, "busy":false, "failed":true]]]
+        store.receiveConnections(try JSONSerialization.data(withJSONObject: legacy))
+        precondition(!store.supportsConnectionDeletion && !store.canDeleteConnection)
         store.stop()
         precondition(store.connections.isEmpty && store.conversation == nil)
-        print("PASS: multiple connection selection, targeted controls, aggregate busy, bound resume, stale-event isolation and shutdown rejection")
+        print("PASS: multiple connection selection, targeted deletion, stale confirmation and legacy guards, aggregate busy, bound resume and shutdown rejection")
     }
 
     @MainActor static func main() async throws {

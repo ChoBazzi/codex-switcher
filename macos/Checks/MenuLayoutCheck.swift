@@ -56,7 +56,7 @@ struct MenuLayoutCheck {
             store.accounts = Array(saved.prefix(count))
             if count == 5 {
                 let rows = (1...5).map { ["id":String($0), "ready":true, "busy":$0 == 2, "failed":$0 == 3] as [String: Any] }
-                direct.receiveConnections(try JSONSerialization.data(withJSONObject: ["event":"connection_list", "selected":"1", "connections":rows, "limit":5]))
+                direct.receiveConnections(try JSONSerialization.data(withJSONObject: ["event":"connection_list", "selected":"1", "connections":rows, "limit":5, "can_delete":true]))
             }
             for scheme in [ColorScheme.light, .dark] {
                 let renderer = ImageRenderer(content: MenuPanel(store: store)
@@ -73,6 +73,17 @@ struct MenuLayoutCheck {
                 }
                 precondition(image.size.height < 850, "account grid exceeds menu height budget")
                 print("PASS: menu render \(count) accounts, \(scheme), \(Int(image.size.width))×\(Int(image.size.height))")
+                if count == 5 {
+                    let confirmation = ProxyConnectionDeletion(id: "3", home: "/synthetic", revision: 1)
+                    let deletionRenderer = ImageRenderer(content: MenuPanel(store: store, connectionDeletion: confirmation)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                        .environment(\.colorScheme, scheme).fixedSize())
+                    guard let confirmationImage = deletionRenderer.nsImage else { fatalError("deletion confirmation render failed") }
+                    try FileHandle.standardError.write(contentsOf: Data("deletion confirmation size: \(scheme), \(confirmationImage.size)\n".utf8))
+                    precondition(abs(confirmationImage.size.width - 620) < 1 && confirmationImage.size.height < 850,
+                                 "deletion confirmation exceeds menu size budget")
+                    print("PASS: deletion confirmation render \(scheme), \(Int(confirmationImage.size.width))×\(Int(confirmationImage.size.height))")
+                }
             }
             store.accounts = saved
         }

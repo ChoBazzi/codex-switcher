@@ -244,7 +244,7 @@ func (b *serviceBroker) attach(conn net.Conn) {
 		var action string
 		_ = json.Unmarshal(command["action"], &action)
 		switch action {
-		case "connection_create", "connection_select", "status", "usage", "select", "recover", "abandon_turn", "account_changing", "account_changed", "shutdown":
+		case "connection_create", "connection_select", "connection_delete", "status", "usage", "select", "recover", "abandon_turn", "account_changing", "account_changed", "shutdown":
 		case "usage_refresh":
 			var id uint64
 			if json.Unmarshal(command["request_id"], &id) != nil || id == 0 {
@@ -372,7 +372,13 @@ func proxyStopConnection(newSession bool, connection string) error {
 			return errors.New("proxy_connection_unavailable")
 		}
 	}
-	if err = json.NewEncoder(conn).Encode(map[string]any{"action": "shutdown", "new_session": newSession, "connection_id": connection}); err != nil {
+	command := map[string]any{"action": "shutdown", "new_session": newSession}
+	// A plain stop ends the service even if the original connection was deleted.
+	// Retirement always keeps its explicit target and never falls back.
+	if newSession || connection != "1" {
+		command["connection_id"] = connection
+	}
+	if err = json.NewEncoder(conn).Encode(command); err != nil {
 		return errDaemon
 	}
 	for scanner.Scan() {

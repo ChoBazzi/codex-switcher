@@ -266,13 +266,15 @@ struct MenuPanel: View {
     @StateObject private var codexSettings = CodexSettingsStore()
     @State private var showingCodexSettings = false
     @State private var showingDiagnostics = false
+    @State private var connectionDeletion: ProxyConnectionDeletion?
     @ObservedObject var store: MenuStore
     @ObservedObject var login: AccountLoginStore
     @ObservedObject var direct: DirectProxyStore
-    init(store: MenuStore) {
+    init(store: MenuStore, connectionDeletion: ProxyConnectionDeletion? = nil) {
         self.store = store
         self.login = store.login
         self.direct = store.direct
+        _connectionDeletion = State(initialValue: connectionDeletion)
     }
     // Dark saturated blue gives white text strong contrast in either appearance.
     private let activeBlue = Color(red: 0.12, green: 0.25, blue: 0.68)
@@ -306,9 +308,31 @@ struct MenuPanel: View {
                     Button("새 연결") { direct.addConnection() }
                         .disabled(store.demo || !direct.canAddConnection || login.busy)
                         .help("최대 5개 연결에서 각각 별도의 CLI 대화를 실행합니다. 선택은 다른 연결의 작업을 중단하지 않습니다.")
+                    if direct.supportsConnectionDeletion {
+                        Button("세션 삭제", role: .destructive) { connectionDeletion = direct.deletionConfirmation() }
+                            .disabled(store.demo || !direct.canDeleteConnection || login.busy)
+                    }
                 }
             }
-            sessionCard
+            if let confirmation = connectionDeletion {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("연결 \(confirmation.id)의 세션을 삭제할까요?").font(.subheadline)
+                        Spacer()
+                        Button("취소") { connectionDeletion = nil }
+                        Button("세션 삭제 확인", role: .destructive) {
+                            direct.deleteConnection(confirmation)
+                            connectionDeletion = nil
+                        }.disabled(store.demo || login.busy || direct.deletionConfirmation() != confirmation)
+                    }
+                    Text("해당 CLI를 종료한 뒤 삭제하세요. 대화 파일은 보존하고 다른 연결은 유지합니다. 마지막 연결이면 빈 연결을 준비합니다.")
+                        .font(.caption).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                sessionCard
+            }
             if !store.demo && !store.sessions.isEmpty {
                 Picker("확인할 세션", selection: $store.selectedSessionID) {
                     Text("최근 활성 세션 자동 선택").tag(Optional<String>.none)

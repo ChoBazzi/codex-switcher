@@ -228,6 +228,11 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 		if checkpointErr != nil {
 			return checkpointErr
 		}
+		// Only an explicit coordinator create reuses a deleted slot. Its old
+		// home and history remain on disk, but never supply a new capability.
+		if saved != nil && saved.Deleted {
+			saved = nil
+		}
 	}
 	secret := newDirectSecret()
 	if saved != nil {
@@ -337,6 +342,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 	}
 	var checkpointAddress, checkpointHome string
 	checkpointRetired := false
+	checkpointDeleted := false
 	var lastCheckpoint *probeCheckpoint
 	persist := func() bool {
 		if checkpointDir == "" {
@@ -345,7 +351,7 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 		if checkpointErr != nil {
 			return false
 		}
-		c := &probeCheckpoint{Retired: checkpointRetired, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
+		c := &probeCheckpoint{Retired: checkpointRetired, Deleted: checkpointDeleted, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
 			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
 			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
 			LastBody: lastBodyHash, LastUser: lastUserBoundary, PreviousCredential: previousCredential, Revision: revision, OpaqueSlot: opaqueSlot}
@@ -387,17 +393,34 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 		}
 		report(map[string]any{"event": "usage_snapshot", "interval_seconds": 60, "accounts": aged})
 	}
-	if *automatic && usagePrimary {
+	var usageDone chan struct{}
+	defer func() {
+		cancel()
+		if usageDone != nil {
+			<-usageDone
+		}
+	}()
+	// Promotion happens only after the previous primary has fully stopped.
+	// Surviving model conversations retain their handlers and ownership.
+	startUsage := func() {
+		if !*automatic || usageDone != nil {
+			return
+		}
+		usagePrimary = true
+		usageRunning = true
+		var client *usage.Client
 		if fetcher == nil {
-			client := usage.NewClient()
-			defer client.Close()
+			client = usage.NewClient()
 			fetcher = client
 		}
 		monitor := usage.NewMonitor(access, fetcher)
 		done := make(chan struct{})
-		defer func() { cancel(); <-done }()
+		usageDone = done
 		go func() {
 			defer close(done)
+			if client != nil {
+				defer client.Close()
+			}
 			var observed [accountslot.Capacity]uint64
 			for {
 				if ctx.Err() != nil {
@@ -450,6 +473,9 @@ func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer
 				mu.Unlock()
 			}
 		}()
+	}
+	if usagePrimary {
+		startUsage()
 	}
 	// Caller holds mu. A single ordered pipe carries observations and acknowledgments.
 	state := func(event string, accepted bool) {
@@ -1081,6 +1107,7 @@ X-Switcher-Run = %q
 				var command struct {
 					Action     string `json:"action"`
 					NewSession bool   `json:"new_session"`
+					Delete     bool   `json:"delete_connection"`
 					Slot       string `json:"slot"`
 					Revision   uint64 `json:"revision"`
 					RequestID  uint64 `json:"request_id"`
@@ -1091,8 +1118,13 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "prepare_shutdown" {
-					shutdownPrepared = !busy && !waiting && !turnPending && !auxActive() && checkpointErr == nil
+					shutdownPrepared = !busy && !waiting && !turnPending && !auxActive() && checkpointErr == nil && (!command.Delete || command.Revision == revision)
 					state("probe_shutdown_prepared", shutdownPrepared)
+					mu.Unlock()
+					continue
+				}
+				if command.Action == "usage_primary" {
+					startUsage()
 					mu.Unlock()
 					continue
 				}
@@ -1124,7 +1156,10 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "shutdown" {
-					ok := !busy && !waiting && !turnPending && !auxActive()
+					ok := !busy && !waiting && !turnPending && !auxActive() && (!command.Delete || shutdownPrepared)
+					if ok && command.Delete {
+						checkpointDeleted = true
+					}
 					if ok && command.NewSession {
 						checkpointRetired = true
 					}

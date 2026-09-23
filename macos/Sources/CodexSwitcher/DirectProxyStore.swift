@@ -28,9 +28,26 @@ final class DirectProxyStore: ObservableObject {
     @Published private(set) var connections: [ProxyConnection] = []
     @Published private(set) var selectedConnection = "1"
     @Published private(set) var conversation: String?
+    @Published private(set) var supportsConnectionDeletion = false
     var allBusy: Bool { busy || connections.contains { $0.busy || !$0.ready } }
     var canAddConnection: Bool { ready && !pending && !stopping && !connections.isEmpty && connections.count < 5 }
     var canChooseConnection: Bool { ready && !pending && !stopping && !connections.isEmpty }
+    var canDeleteConnection: Bool {
+        canChooseConnection && supportsConnectionDeletion && !busy && home != nil &&
+            connections.contains { $0.id == selectedConnection && $0.ready && !$0.busy }
+    }
+
+    func deletionConfirmation() -> ProxyConnectionDeletion? {
+        guard canDeleteConnection, let home else { return nil }
+        return ProxyConnectionDeletion(id: selectedConnection, home: home, revision: revision)
+    }
+
+    func deleteConnection(_ confirmation: ProxyConnectionDeletion) {
+        guard canDeleteConnection, confirmation.id == selectedConnection,
+              confirmation.home == home, confirmation.revision == revision else { return }
+        control(["action": "connection_delete", "connection_id": confirmation.id,
+                 "expected_home": confirmation.home, "revision": confirmation.revision])
+    }
 
     func chooseConnection(_ id: String) {
         guard canChooseConnection, id != selectedConnection, connections.contains(where: { $0.id == id && $0.ready }) else { return }
@@ -43,13 +60,14 @@ final class DirectProxyStore: ObservableObject {
     // The coordinator serializes selection and all observations. Never carry
     // another conversation's profile, revision, failure or diagnostics across it.
     @discardableResult func receiveConnections(_ data: Data) -> Bool {
-        struct Event: Decodable { let event: String; let selected: String?; let connections: [ProxyConnection]?; let limit: Int? }
+        struct Event: Decodable { let event: String; let selected: String?; let connections: [ProxyConnection]?; let limit: Int?; let can_delete: Bool? }
         guard let e = try? JSONDecoder().decode(Event.self, from: data), e.event == "connection_list" else { return false }
-        guard e.limit == 5, let rows = e.connections, !rows.isEmpty, rows.count <= 5,
+        guard e.limit == 5, let rows = e.connections, rows.count <= 5,
               Set(rows.map(\.id)).count == rows.count, rows.allSatisfy({ ["1", "2", "3", "4", "5"].contains($0.id) }),
-              let selected = e.selected, rows.contains(where: { $0.id == selected }) else {
-            ready = false; connections = []; return true
+              let selected = e.selected, selected.isEmpty || rows.contains(where: { $0.id == selected }) else {
+            ready = false; connections = []; supportsConnectionDeletion = false; return true
         }
+        supportsConnectionDeletion = e.can_delete == true
         connections = rows
         if selected != selectedConnection {
             selectedConnection = selected
@@ -267,6 +285,7 @@ final class DirectProxyStore: ObservableObject {
         if receiveDiagnosticEvent(data) { return }
         struct Event: Decodable {
             let event: String
+            var action: String?
             var slot: String?; var busy: Bool?; var failed: Bool?; var connected: Bool?
             var revision: UInt64?; var accepted: Bool?; var codex_home: String?
             var conversation: String?
@@ -278,7 +297,9 @@ final class DirectProxyStore: ObservableObject {
         guard let e = try? JSONDecoder().decode(Event.self, from: data) else { return }
         if e.event == "connection_result" {
             pending = false
-            if e.accepted != true { message = "연결 변경 거절 · 현재 상태를 다시 확인하세요" }
+            if e.action == "connection_delete" {
+                message = e.accepted == true ? "세션 삭제 완료 · 대화 파일은 보존했습니다" : "세션 삭제 거절 · 작업 상태를 확인하고 다시 선택하세요"
+            } else if e.accepted != true { message = "연결 변경 거절 · 현재 상태를 다시 확인하세요" }
             return
         }
         if e.event == "probe_shutdown", stopping {
@@ -458,7 +479,7 @@ final class DirectProxyStore: ObservableObject {
         finishUsageRead("프록시 연결 전")
         onUsageUnavailable?()
         generation = UUID()
-        connections = []; selectedConnection = "1"; conversation = nil
+        connections = []; selectedConnection = "1"; conversation = nil; supportsConnectionDeletion = false
         helperBuild = nil; proxyBuild = nil; proxyProtocol = nil
         auxiliaryCount = nil; auxiliaryLimit = nil
         authentication = nil
@@ -472,6 +493,12 @@ final class DirectProxyStore: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 4) { if owned.isRunning { kill(owned.processIdentifier, SIGKILL) } }
         }
     }
+}
+
+struct ProxyConnectionDeletion: Equatable {
+    let id: String
+    let home: String
+    let revision: UInt64
 }
 
 struct ProxyConnection: Decodable, Identifiable {
