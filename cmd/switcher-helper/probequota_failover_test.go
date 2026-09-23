@@ -40,6 +40,9 @@ func TestProbeUsageLimitFailover(t *testing.T) {
 					if n >= 3 && (strings.Contains(string(body), "opaque-a") || strings.Contains(string(body), "call-a") || !strings.Contains(string(body), "already done")) {
 						t.Error("portable tool context wrong")
 					}
+					if n == 4 && (!strings.Contains(string(body), "synthetic-task-b") || strings.Contains(string(body), "synthetic-call") || strings.Contains(string(body), "opaque-b")) {
+						t.Error("owned collaboration follow-up lost or unnormalized")
+					}
 					if n == 2 || n == 3 && shape == "all_limited" {
 						if shape == "sse" || shape == "partial" {
 							w.Header().Set("Content-Type", "text/event-stream")
@@ -71,6 +74,7 @@ func TestProbeUsageLimitFailover(t *testing.T) {
 							map[string]any{"type": "reasoning", "id": "reason-b", "summary": []any{}, "encrypted_content": "opaque-b"},
 							map[string]any{"type": "function_call", "name": "read", "call_id": "call-b", "arguments": "{}"},
 						}
+						output = append(output, syntheticAgentCall("synthetic-task-b"))
 					} else {
 						output = []any{map[string]any{"type": "message", "role": "assistant", "phase": "final_answer", "content": []any{}}}
 					}
@@ -129,6 +133,8 @@ func TestProbeUsageLimitFailover(t *testing.T) {
 					}
 					h.next(t, "probe_state", func(e map[string]any) bool { return e["slot"] == "b" && e["can_abandon_turn"] == true })
 					items += `,{"type":"reasoning","id":"reason-b","summary":[],"encrypted_content":"opaque-b"},{"type":"function_call","name":"read","call_id":"call-b","arguments":"{}"},{"type":"function_call_output","call_id":"call-b","output":"second done"}`
+					collaboration, _ := json.Marshal(syntheticAgentCall("synthetic-task-b"))
+					items += `,` + string(collaboration) + `,{"type":"function_call_output","call_id":"synthetic-call","output":"started"},{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":"synthetic-task-b"}]}`
 					if code, _ = send(`{"input":[` + items + `]}`); code != 200 {
 						t.Fatal("next tool follow-up lost migrated context")
 					}
@@ -166,13 +172,19 @@ func TestAuxiliaryUsageLimitFailover(t *testing.T) {
 		if n == 2 {
 			output = []any{map[string]any{"type": "reasoning", "id": "reason-b", "summary": []any{}, "encrypted_content": "opaque-b"}, map[string]any{"type": "function_call", "name": "read", "call_id": "call-original", "arguments": "{}"}}
 		}
+		if n == 2 {
+			output = append(output, syntheticAgentCall("synthetic-task-b"))
+		}
+		if n == 3 && (!strings.Contains(string(body), "synthetic-task-b") || strings.Contains(string(body), "synthetic-call")) {
+			t.Error("auxiliary collaboration history lost or unnormalized")
+		}
 		data, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "synthetic", "status": "completed", "output": output}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: "+string(data)+"\n\n")
 	}))
 	defer up.Close()
 	var mu sync.Mutex
-	a := &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: "synthetic-child", Root: "synthetic-root", Slot: "a"}}
+	a := &probeAuxiliary{agentOwners: &probeAgentOwners{}, binding: probeAuxiliaryBinding{Thread: "synthetic-child", Root: "synthetic-root", Slot: "a"}}
 	a.quotaAlternative = func(tried map[string]bool) string {
 		if !tried["b"] {
 			return "b"
@@ -199,7 +211,9 @@ func TestAuxiliaryUsageLimitFailover(t *testing.T) {
 	if w.Code != 200 || strings.Contains(w.Body.String(), "usage_limit_reached") || a.failed || !a.pending || a.binding.Slot != "b" || !committed {
 		t.Fatal("auxiliary failover state incorrect")
 	}
-	w = send(`{"input":[{"role":"user","content":"work"},{"type":"reasoning","id":"reason-b","summary":[],"encrypted_content":"opaque-b"},{"type":"function_call","name":"read","call_id":"call-original","arguments":"{}"},{"type":"function_call_output","call_id":"call-original","output":"finished tool"}]}`)
+	collaboration, _ := json.Marshal(syntheticAgentCall("synthetic-task-b"))
+	followup := `{"input":[{"role":"user","content":"work"},{"type":"reasoning","id":"reason-b","summary":[],"encrypted_content":"opaque-b"},{"type":"function_call","name":"read","call_id":"call-original","arguments":"{}"},{"type":"function_call_output","call_id":"call-original","output":"finished tool"},` + string(collaboration) + `,{"type":"function_call_output","call_id":"synthetic-call","output":"started"},{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":"synthetic-task-b"}]}]}`
+	w = send(followup)
 	if w.Code != 200 || a.failed || a.pending || calls.Load() != 3 {
 		t.Fatal("auxiliary follow-up failed")
 	}

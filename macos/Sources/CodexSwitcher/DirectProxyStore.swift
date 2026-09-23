@@ -626,6 +626,7 @@ struct ProxyDiagnostic: Identifiable {
         "message_content_unsupported": ("메시지 내용 형식이 지원 범위를 벗어났습니다", "이미지·파일 등 사용한 기능의 지원 여부를 확인하세요."),
         "agent_message_shape_unsupported": ("에이전트 메시지 형식이 지원 범위를 벗어났습니다", "실행 중인 프록시에 최신 이력 형식 지원이 적용됐는지 확인하세요."),
         "agent_message_owner_unavailable": ("에이전트 작업 지시의 인증 신원을 확인할 수 없습니다", "지시를 삭제하거나 다른 계정으로 전송하지 않았습니다. 계정 변경·구버전에서 생성된 이력이라면 새 연결의 새 대화에서 작업을 시작하세요."),
+        "agent_message_portable_owner_unavailable": ("전환 후 협업 이력의 인증 신원을 확인할 수 없습니다", "현재 계정에서 확인되지 않은 작업 지시는 전송하지 않았습니다. 이전 계정의 협업 이력은 자동으로 옮길 수 없습니다."),
         "auxiliary_restart_required": ("재시작 이전의 보조 작업은 재개할 수 없습니다", "새 리뷰·새 에이전트 작업을 시작하세요. 자동 검토가 같은 실패 대화를 재사용하면 새 연결의 Codex 대화에서 진행하세요."),
         "reasoning_shape_unsupported": ("내부 추론 이력 형식을 확인하지 못했습니다", "CLI와 프록시의 호환성을 확인하세요. 이력 내용은 진단에 포함하지 않습니다."),
         "tool_declaration_unsupported": ("지원하지 않는 도구 선언입니다", "서버 실행 도구 등 현재 지원하지 않는 기능을 사용 중인지 확인하세요."),

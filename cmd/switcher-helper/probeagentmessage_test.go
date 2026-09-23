@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -8,6 +9,45 @@ import (
 )
 
 const syntheticAgentMessage = `{"type":"agent_message","id":"msg_synthetic_agent","author":"synthetic-child","recipient":"synthetic-parent","content":[{"type":"input_text","text":"Synthetic child result."}]}`
+
+func TestProbePortableAgentOwnership(t *testing.T) {
+	owner := sha256.Sum256([]byte("synthetic-current-account"))
+	other := sha256.Sum256([]byte("synthetic-other-account"))
+	var owners probeAgentOwners
+	owners.accept(map[[32]byte]bool{sha256.Sum256([]byte("synthetic-task")): true}, owner)
+	call, _ := json.Marshal(syntheticAgentCall("synthetic-task"))
+	for _, history := range []string{
+		`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":"synthetic-task"}]}`,
+		string(call) + `,{"type":"function_call_output","call_id":"synthetic-call","output":"done"}`,
+	} {
+		for _, tc := range []struct {
+			name       string
+			credential [32]byte
+			callback   bool
+		}{
+			{"current", owner, true}, {"other", other, true}, {"fallback", owner, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				parsed := parseProbeToolInput([]byte(`{"input":[{"role":"user","content":"work"},{"type":"reasoning","summary":[],"encrypted_content":"synthetic-old-reasoning"},` + history + `]}`))
+				parsed.portable = true
+				if tc.callback {
+					parsed.agentOwner = func(s string) bool { return owners.permits(s, tc.credential) }
+				}
+				out, err := parsed.normalize("b", "", "synthetic", nil, nil)
+				if tc.name != "current" {
+					var detail *probeBodyError
+					if !errors.As(err, &detail) || detail.Reason != "agent_message_portable_owner_unavailable" {
+						t.Fatalf("wrong rejection: %v", err)
+					}
+					return
+				}
+				if err != nil || !parsed.needsAgentOwner || !strings.Contains(string(out), "synthetic-task") || strings.Contains(string(out), "synthetic-old-reasoning") || strings.Contains(string(out), "synthetic-call") {
+					t.Fatalf("owned follow-up lost or old history exported: %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestProbeToolsAgentMessageEncryptedAttachment(t *testing.T) {
 	message := strings.Replace(syntheticAgentMessage, `}]}`, `},{"type":"encrypted_content","encrypted_content":"synthetic-parent-opaque"}]}`, 1)
@@ -45,7 +85,8 @@ func TestProbeToolsAgentMessageEncryptedAttachment(t *testing.T) {
 		}
 	}
 	// A nonempty envelope is not evidence that it contains the task. Preserve
-	// owned opaque-only instructions and reject every portable/cross-account path.
+	// owned opaque-only instructions and reject cross-account fallback without
+	// a verified owner, including when the visible text is only an envelope.
 	for _, content := range []string{
 		`[{"type":"encrypted_content","encrypted_content":"synthetic-parent-opaque"}]`,
 		`[{"type":"input_text","text":"TASK Payload:"},{"type":"encrypted_content","encrypted_content":"synthetic-parent-opaque"}]`,
@@ -63,7 +104,6 @@ func TestProbeToolsAgentMessageEncryptedAttachment(t *testing.T) {
 		}
 		parsed = parseProbeToolInput(input)
 		parsed.portable = true
-		parsed.agentOwner = func(string) bool { return true }
 		if _, err := parsed.normalize("b", "", "salt", nil, nil); err == nil {
 			t.Fatal("portable normalization exported task")
 		}

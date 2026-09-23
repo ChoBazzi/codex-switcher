@@ -20,9 +20,17 @@
 - 입력의 `agent_message`는 type/id/author/recipient/content 계약을 유지한다. content는 기존 input_text와 정확한 두 필드(type/encrypted_content)의 비어 있지 않은 문자열 암호문만 허용한다. 미지원 필드·참조·잘못된 값은 거절한다. 검증된 암호문만 있는 메시지도 보존한다. item ID만 제거하며 텍스트·암호문·순서를 바꾸지 않는다. 사용자 턴 경계나 인증·라우팅 근거로 취급하지 않는다.
 - 암호문이 현재 계정 인증에서 관측됐는지 본문 정규화 때 검사하고 실제 dispatch에서도 같은 인증인지 재검사한다. 새 보조 대화도 검증한 인증에 고정한다. 본문 검사 후 재로그인·인증 교체로 다른 신원에 전달되는 것을 막는다.
 - 같은 암호문이 원래 협업 도구 호출의 arguments에도 남는다. 해당 message 인자도 동일 소유권 검사와 dispatch 고정을 적용해 과거 call_id 치환만으로 다른 계정에 수출되지 않게 한다. 도구 메시지가 평문인지 암호문인지 임의 추정하지 않고 알려진 협업 호출의 모든 message 인자에 보수적으로 적용한다.
-- 명시적 한도 후 portable 정규화는 암호화 agent_message와 보호된 협업 호출을 거절한다. reasoning 제거처럼 삭제하고 자동 전환하지 않는다. 암호화 협업 이력이 있는 요청의 계정 간 자동 전환은 제한된다. 기존 reasoning/compaction 및 도구 쌍 검증을 완화하지 않는다.
+- 명시적 한도 후 다른 계정으로 보내는 최초 fallback 정규화는 소유권 callback을 제공하지 않아 암호화 agent_message와 보호된 협업 호출을 거절한다. 전환 완료 후 같은 사용자 턴의 후속 요청은 portable 정규화를 유지하되, 현재 인증에서 성공 응답으로 관측·등록된 협업 메시지에 한해 내용을 보존한다. 해당 메시지는 본문 검증과 실제 dispatch의 인증 고정을 모두 요구한다. reasoning 제거처럼 지시를 삭제하거나 다른 계정의 소유권을 추정하지 않는다. 암호화 협업 이력이 있는 요청의 계정 간 자동 전환은 계속 제한되며 기존 reasoning/compaction 및 도구 쌍 검증을 완화하지 않는다.
 - 보조 실패 잠금은 유지한다. 재시작에서 복원된 보조 작업은 `probe_auxiliary_restart_required`로 일반 `probe_previous_request_failed`와 구분한다. UI에 새 명시적 작업 또는 검토 대화가 재사용될 때 새 연결이 필요함을 안내한다. 소유권 복원은 실패 작업의 자동 재개 승인이 아니다.
-- 소유권 미확인은 `agent_message_owner_unavailable`로 분리한다. 진단에는 메시지/암호문/해시/경로를 넣지 않는다. 추가 의존성 없음.
+- 소유권 미확인은 `agent_message_owner_unavailable`, portable 정규화 중의 소유권 미확인은 `agent_message_portable_owner_unavailable`로 구분한다. 진단에는 메시지/암호문/해시/경로를 넣지 않는다. 추가 의존성 없음.
+
+## 전환 후 협업 후속 요청 수정
+
+2026-09-23: portable 모드 자체를 무조건 거절 조건으로 사용하면 A→B 전환 후 B가 새로 생성한 정상 협업 지시까지 다음 요청에서 거절된다. 최초 계정 간 이동과 전환 후 동일 인증의 후속 요청을 구분하도록 수정했다. `TestProbePortableAgentOwnership`은 메시지·협업 호출 양쪽 경로에서 현재 인증의 지시 보존, dispatch 고정, 다른 인증 및 callback 없는 fallback 거절을 검사한다. `TestProbeUsageLimitFailover`와 `TestAuxiliaryUsageLimitFailover`는 실제 합성 upstream의 B 응답에서 소유권을 등록하고 같은 턴의 후속 요청을 검증한다. 진단은 relay 및 UI 검사를 포함한다.
+
+이 수정은 코드에서 확인한 거절 경로에 대한 것으로, 보고된 연결 4의 과거 실패 원인을 확정하지 않는다. 실패 당시 portable 상태와 실제 요청은 보관되지 않았으며 현재 저장 상태의 메시지·인증은 일치했다. 기존 checkpoint·세션 이력·실패 잠금은 수정하지 않고 실행 중인 daemon도 교체하지 않는다.
+
+검증: Go overlay로 수정 전 파서만 임시 대체했을 때 `TestProbePortableAgentOwnership/current`의 두 전달 경로가 실패했고, 수정 후 `-race`로 통과했다. 루트·보조 failover 및 기존 소유권 dispatch 차단 통합 테스트를 `-race -count=1`로 통과했다. `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer sh macos/Checks/verify.sh` 전체(Go race/vet, 설치 CLI 합성 검사, helper·Swift 빌드와 UI 검사)도 통과했다. 기존 Swift 경고는 남아 있으며 이번 수정의 실계정 적용은 수행하지 않았다.
 
 ## 한계 및 적용
 

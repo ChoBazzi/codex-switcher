@@ -137,8 +137,8 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 			_ = json.Unmarshal(item["content"], &parts)
 			for _, part := range parts {
 				if probeString(part, "type") == "encrypted_content" {
-					if d.portable || d.agentOwner == nil || !d.agentOwner(probeString(part, "encrypted_content")) {
-						return bad("agent_message_owner_unavailable", i)
+					if reason := d.agentOwnershipRejection(probeString(part, "encrypted_content")); reason != "" {
+						return bad(reason, i)
 					}
 					d.needsAgentOwner = true
 				}
@@ -158,8 +158,8 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 			// The same opaque payload can also return inside its original tool
 			// arguments. Do not let call-ID remapping export it to another account.
 			if message := probeAgentOutputMessage(item); message != "" {
-				if d.portable || d.agentOwner == nil || !d.agentOwner(message) {
-					return bad("agent_message_owner_unavailable", i)
+				if reason := d.agentOwnershipRejection(message); reason != "" {
+					return bad(reason, i)
 				}
 				d.needsAgentOwner = true
 			}
@@ -227,6 +227,20 @@ func (d *probeToolInput) normalize(slot, previousSlot, salt string, allow, reaso
 	d.needsTurnOwner = !d.portable && probeItemsNeedTurnOwner(result)
 	p["input"], _ = json.Marshal(result)
 	return json.Marshal(p)
+}
+
+// Portable follow-ups still carry old reasoning/call IDs, but may also carry
+// new collaboration messages observed under the current account. Verify those
+// messages against the current credential and retain the dispatch pin. Initial
+// cross-account fallback deliberately supplies no owner callback and stays closed.
+func (d *probeToolInput) agentOwnershipRejection(message string) string {
+	if d.agentOwner != nil && d.agentOwner(message) {
+		return ""
+	}
+	if d.portable {
+		return "agent_message_portable_owner_unavailable"
+	}
+	return "agent_message_owner_unavailable"
 }
 
 func probeString(item map[string]json.RawMessage, key string) string {

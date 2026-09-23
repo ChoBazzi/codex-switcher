@@ -404,7 +404,7 @@ struct DirectProxyCheck {
             _ = try oversized.append(Data(repeating: 97, count: 8193))
             preconditionFailure("oversized relay record accepted")
         } catch ProxyEventFrames.Failure.oversized {}
-        for code in ["request_body_timeout", "request_too_large", "request_unreadable", "credential_store_unavailable", "auxiliary_capacity_reached", "agent_message_owner_unavailable", "auxiliary_restart_required"] {
+        for code in ["request_body_timeout", "request_too_large", "request_unreadable", "credential_store_unavailable", "auxiliary_capacity_reached", "agent_message_owner_unavailable", "agent_message_portable_owner_unavailable", "auxiliary_restart_required"] {
             precondition(ProxyDiagnostic(scope: "root", code: code, at: "2026-09-21T00:00:00Z") != nil)
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)

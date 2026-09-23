@@ -42,7 +42,7 @@ func diagnosticCategory(code string) string {
 		return "history_owner_unavailable"
 	case "compaction_owner_unavailable":
 		return code
-	case "agent_message_owner_unavailable":
+	case "agent_message_owner_unavailable", "agent_message_portable_owner_unavailable":
 		return code
 	case "auxiliary_credential_changed":
 		return code
@@ -110,7 +110,7 @@ func sanitizedProbeDiagnostic(data []byte) *probeDiagnostic {
 		// Coordinator summaries cross a second relay boundary. Revalidate
 		// the complete fixed vocabulary; never forward arbitrary summaries.
 		switch d.Code {
-		case "history_owner_unavailable", "compaction_owner_unavailable", "agent_message_owner_unavailable", "auxiliary_credential_changed", "auxiliary_restart_required",
+		case "history_owner_unavailable", "compaction_owner_unavailable", "agent_message_owner_unavailable", "agent_message_portable_owner_unavailable", "auxiliary_credential_changed", "auxiliary_restart_required",
 			"authentication_expired", "account_unavailable", "session_unavailable", "credential_store_unavailable",
 			"request_body_timeout", "request_too_large", "request_unreadable", "auxiliary_capacity_reached", "request_canceled",
 			"cli_identity_invalid", "conversation_changed", "previous_request_failed", "new_input_required",

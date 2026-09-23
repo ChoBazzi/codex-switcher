@@ -13,6 +13,30 @@ import (
 	"time"
 )
 
+func TestProbePortableAgentDiagnostic(t *testing.T) {
+	for _, scope := range []string{"root", "auxiliary"} {
+		raw, _ := json.Marshal(map[string]any{"event": "probe_blocked", "scope": scope, "detail": map[string]string{"reason": "agent_message_portable_owner_unavailable"}, "body": "synthetic-secret"})
+		d := sanitizedProbeDiagnostic(raw)
+		if d == nil || d.Code != "agent_message_portable_owner_unavailable" || d.Scope != scope {
+			t.Fatal("portable rejection lost")
+		}
+		raw, _ = json.Marshal(d)
+		var forwarded map[string]any
+		_ = json.Unmarshal(raw, &forwarded)
+		forwarded["event"] = "probe_diagnostic"
+		forwarded["secret"] = "synthetic-secret"
+		raw, _ = json.Marshal(forwarded)
+		next := sanitizedProbeDiagnostic(raw)
+		if next == nil || next.Code != d.Code || next.Scope != scope {
+			t.Fatal("relay lost portable rejection")
+		}
+		raw, _ = json.Marshal(next)
+		if strings.Contains(string(raw), "synthetic-secret") {
+			t.Fatal("diagnostic leaked private value")
+		}
+	}
+}
+
 func TestProbeDiagnosticRedaction(t *testing.T) {
 	for _, tc := range []struct{ raw, code, scope string }{
 		{`{"event":"probe_request_finished","last_http_status":409,"local_rejection_code":"history_owner_unavailable"}`, "history_owner_unavailable", "root"},
