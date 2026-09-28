@@ -96,11 +96,41 @@ func NewRefreshing(v credentialstore.Vault, stateDir string, refresher Refresher
 // RequestAccess is called only for explicit model requests and scheduled or
 // explicit usage reads. Access/Status remain local-only, including UI selection.
 func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
+	return m.RequestAccessContext(context.Background(), slot, now)
+}
+
+// Cancellation removes a queued request immediately. Once the durable refresh
+// intent is written, finish the single exchange and commit under its independent
+// timeout before returning cancellation. Never discard rotated credentials.
+func (m *Manager) RequestAccessContext(ctx context.Context, slot string, now time.Time) (Access, error) {
+	refreshing, finish := m.authentication.begin(slot, ctx)
+	defer finish()
+	a, err := m.requestAccessContext(ctx, slot, now, refreshing)
+	if ctx.Err() != nil {
+		return Access{}, ctx.Err()
+	}
+	return a, err
+}
+
+func (m *Manager) requestAccessContext(requestCtx context.Context, slot string, now time.Time, refreshing func()) (Access, error) {
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	if m.refresher == nil {
 		return m.Access(slot, now)
 	}
+	if a, ready, err := m.requestAccessWithoutRefresh(requestCtx, slot, now); ready {
+		return a, err
+	}
+	if err := m.operationMu.LockContext(requestCtx); err != nil {
+		return Access{}, err
+	}
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	if !validSlot(slot) {
 		return Access{}, ErrSlot
 	}
@@ -120,14 +150,11 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if i < 0 {
 		return Access{}, ErrNotRegistered
 	}
-	asAccess := func(c Credentials) Access {
-		return Access{Token: c.AccessToken, AccountID: c.AccountID, ExpiresAt: c.ExpiresAt}
-	}
 	if r.Accounts[i].RefreshBlocked {
 		return Access{}, ErrRefresh
 	}
 	if r.Accounts[i].Credentials.ExpiresAt.After(now.Add(2 * time.Minute)) {
-		return asAccess(r.Accounts[i].Credentials), nil
+		return r.Accounts[i].access(), nil
 	}
 	if m.refresher == nil || m.tempParent == "" {
 		return Access{}, ErrExpired
@@ -152,7 +179,7 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	}
 	old := r.Accounts[i].Credentials
 	if old.ExpiresAt.After(now.Add(2 * time.Minute)) {
-		return asAccess(old), nil
+		return r.Accounts[i].access(), nil
 	}
 	save := func() error {
 		data, e := json.Marshal(r)
@@ -167,13 +194,25 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	}
 	// Persist before dispatch: a crash or lost response must not replay a possibly
 	// consumed refresh token. Explicit reauthentication clears this marker.
+	if err := requestCtx.Err(); err != nil {
+		return Access{}, err
+	}
 	r.Accounts[i].RefreshBlocked = true
+	refreshing()
 	if err = save(); err != nil {
 		return Access{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	next, err := m.refresher.Refresh(ctx, old)
+	// Keep mutation and interprocess locks through commit, but do not hold the
+	// local-read mutex over network I/O. Other requests join via operationMu.
+	m.refreshSlot = slot
+	next, err := func() (Credentials, error) {
+		m.mu.Unlock()
+		defer m.mu.Lock()
+		return m.refresher.Refresh(ctx, old)
+	}()
+	m.refreshSlot = ""
 	if err != nil {
 		return Access{}, ErrRefresh
 	}
@@ -186,12 +225,51 @@ func (m *Manager) RequestAccess(slot string, now time.Time) (Access, error) {
 	if err != nil || !sameIdentity(old, next) || !next.ExpiresAt.After(time.Now().Add(2*time.Minute)) {
 		return Access{}, ErrRefresh
 	}
+	owner := r.Accounts[i].access().HistoryCredential()
 	r.Accounts[i].Credentials = next
+	r.Accounts[i].History = &historyBinding{Owner: owner, Current: r.Accounts[i].access().credentialDigest()}
 	r.Accounts[i].RefreshBlocked = false
 	if err = save(); err != nil {
 		return Access{}, err
 	}
-	return asAccess(next), nil
+	return r.Accounts[i].access(), nil
+}
+
+// Only read committed credentials here. Login/logout still exclude this read
+// through mu; its context-aware wait also covers local read contention. A same-slot
+// exchange must join the mutation queue and read its final committed outcome.
+func (m *Manager) requestAccessWithoutRefresh(ctx context.Context, slot string, now time.Time) (Access, bool, error) {
+	if err := m.mu.LockContext(ctx); err != nil {
+		return Access{}, true, err
+	}
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Access{}, true, err
+	}
+	if !validSlot(slot) {
+		return Access{}, true, ErrSlot
+	}
+	if m.refreshSlot == slot {
+		return Access{}, false, nil
+	}
+	r, err := m.read()
+	if err != nil {
+		return Access{}, true, err
+	}
+	for _, a := range r.Accounts {
+		if a.Slot != slot {
+			continue
+		}
+		if a.RefreshBlocked {
+			return Access{}, true, ErrRefresh
+		}
+		if a.Credentials.ExpiresAt.After(now.Add(2 * time.Minute)) {
+			return a.access(), true, nil
+		}
+		// Re-read under the mutation lock before making any refresh decision.
+		return Access{}, false, nil
+	}
+	return Access{}, true, ErrNotRegistered
 }
 
 // RoundTripper may close a request asynchronously after Do returns. Coordinate

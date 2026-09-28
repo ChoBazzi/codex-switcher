@@ -140,3 +140,30 @@ func TestServiceRefusesForeignPath(t *testing.T) {
 		t.Fatal("existing file changed")
 	}
 }
+
+func TestServiceConnectionSwitchClearsCache(t *testing.T) {
+	b := &serviceBroker{cache: map[string][]byte{}}
+	emit := func(value string) { b.Write([]byte(value + "\n")) }
+	emit(`{"event":"connection_list","selected":"1","connections":[]}`)
+	emit(`{"event":"probe_ready","codex_home":"/synthetic-one"}`)
+	emit(`{"event":"probe_state","slot":"a","busy":true,"authentication":[]}`)
+	emit(`{"event":"probe_diagnostic","scope":"root","code":"request_busy","at":"2026-09-22T00:00:00Z"}`)
+	emit(`{"event":"connection_list","selected":"2","connections":[]}`)
+	for _, key := range []string{"probe_ready", "probe_state", "diagnostic_root", "diagnostic_auxiliary"} {
+		if b.cache[key] != nil {
+			t.Fatal("previous connection cache retained")
+		}
+	}
+	if len(b.diagnostics) != 0 {
+		t.Fatal("previous diagnostic suppression retained")
+	}
+	emit(`{"event":"probe_ready","codex_home":"/synthetic-two"}`)
+	emit(`{"event":"probe_state","slot":"b","busy":false,"authentication":[]}`)
+	emit(`{"event":"connection_list","selected":"2","connections":[]}`)
+	if b.cache["probe_ready"] == nil || b.cache["probe_state"] == nil {
+		t.Fatal("same connection status discarded")
+	}
+	if strings.Contains(string(b.cache["probe_state"]), "authentication") {
+		t.Fatal("transient authentication cached")
+	}
+}

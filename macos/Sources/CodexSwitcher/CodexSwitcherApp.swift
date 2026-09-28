@@ -165,7 +165,7 @@ final class MenuStore: ObservableObject {
     }
 
     func connectAccount(_ account: AccountSnapshot) {
-        guard !demo, !direct.usageRefreshing, !login.busy, !direct.busy, let helper,
+        guard !demo, !direct.usageRefreshing, !login.busy, !direct.allBusy, let helper,
               let command = AccountLogin.command(for: account.state) else { return }
         direct.accountChanged(account.slot, changing: true)
         login.start(helper: helper, slot: account.slot, command: command) { [weak self] in
@@ -174,7 +174,7 @@ final class MenuStore: ObservableObject {
     }
 
     func logoutAccount(_ slot: String) {
-        guard !demo, !direct.usageRefreshing, !login.busy, !direct.busy, let helper else { return }
+        guard !demo, !direct.usageRefreshing, !login.busy, !direct.allBusy, let helper else { return }
         direct.accountChanged(slot, changing: true)
         login.start(helper: helper, slot: slot, command: "logout") { [weak self] in
             self?.direct.accountChanged(slot, changing: false)
@@ -265,13 +265,16 @@ struct MenuPanel: View {
     @State private var logoutConfirmation = LogoutConfirmation()
     @StateObject private var codexSettings = CodexSettingsStore()
     @State private var showingCodexSettings = false
+    @State private var showingDiagnostics = false
+    @State private var connectionDeletion: ProxyConnectionDeletion?
     @ObservedObject var store: MenuStore
     @ObservedObject var login: AccountLoginStore
     @ObservedObject var direct: DirectProxyStore
-    init(store: MenuStore) {
+    init(store: MenuStore, connectionDeletion: ProxyConnectionDeletion? = nil) {
         self.store = store
         self.login = store.login
         self.direct = store.direct
+        _connectionDeletion = State(initialValue: connectionDeletion)
     }
     // Dark saturated blue gives white text strong contrast in either appearance.
     private let activeBlue = Color(red: 0.12, green: 0.25, blue: 0.68)
@@ -281,6 +284,8 @@ struct MenuPanel: View {
             CodexSettingsPanel(settings: codexSettings, direct: direct) {
                 showingCodexSettings = false
             }
+        } else if showingDiagnostics {
+            ProxyDiagnosticsPanel(direct: direct) { showingDiagnostics = false }
         } else {
             accountPanel
         }
@@ -295,7 +300,39 @@ struct MenuPanel: View {
                 Text(store.demo ? "데모" : "사용량 모니터")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            sessionCard
+            if !direct.connections.isEmpty {
+                HStack {
+                    Picker("확인할 연결", selection: Binding(get: { direct.selectedConnection }, set: { direct.chooseConnection($0) })) {
+                        ForEach(direct.connections) { connection in Text(connection.title).tag(connection.id) }
+                    }.disabled(store.demo || !direct.canChooseConnection || login.busy)
+                    Button("새 연결") { direct.addConnection() }
+                        .disabled(store.demo || !direct.canAddConnection || login.busy)
+                        .help("최대 5개 연결에서 각각 별도의 CLI 대화를 실행합니다. 선택은 다른 연결의 작업을 중단하지 않습니다.")
+                    if direct.supportsConnectionDeletion {
+                        Button("세션 삭제", role: .destructive) { connectionDeletion = direct.deletionConfirmation() }
+                            .disabled(store.demo || !direct.canDeleteConnection || login.busy)
+                    }
+                }
+            }
+            if let confirmation = connectionDeletion {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("연결 \(confirmation.id)의 세션을 삭제할까요?").font(.subheadline)
+                        Spacer()
+                        Button("취소") { connectionDeletion = nil }
+                        Button("세션 삭제 확인", role: .destructive) {
+                            direct.deleteConnection(confirmation)
+                            connectionDeletion = nil
+                        }.disabled(store.demo || login.busy || direct.deletionConfirmation() != confirmation)
+                    }
+                    Text("해당 CLI를 종료한 뒤 삭제하세요. 대화 파일은 보존하고 다른 연결은 유지합니다. 마지막 연결이면 빈 연결을 준비합니다.")
+                        .font(.caption).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                sessionCard
+            }
             if !store.demo && !store.sessions.isEmpty {
                 Picker("확인할 세션", selection: $store.selectedSessionID) {
                     Text("최근 활성 세션 자동 선택").tag(Optional<String>.none)
@@ -319,7 +356,7 @@ struct MenuPanel: View {
                     .font(.subheadline)
                 Spacer()
                 Button("계정 추가") { store.addAccount() }
-                    .disabled(store.demo || !direct.ready || direct.busy || login.busy || store.helper == nil || AccountSlots.firstVacancy(in: store.accounts) == nil)
+                    .disabled(store.demo || !direct.ready || direct.allBusy || login.busy || store.helper == nil || AccountSlots.firstVacancy(in: store.accounts) == nil)
             }
             // Cancellation must remain reachable even when the account list is
             // empty, scrolled away, or being refreshed during browser login.
@@ -375,9 +412,17 @@ struct MenuPanel: View {
                 }
                 HStack {
                     Button("Codex 설정") { showingCodexSettings = true }
+                    Button("상태·진단") { showingDiagnostics = true }
                     Button(direct.connected ? "대화 재개 명령 복사" : "Codex CLI 연결 명령 복사") {
                         direct.copyCommand(resume: direct.connected)
-                    }.disabled(!direct.ready)
+                    }.disabled(!direct.ready || direct.pending)
+                }
+                if direct.buildWarning != nil {
+                    Label("프록시 빌드 확인 필요 · 상태·진단에서 확인하세요", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if !direct.diagnostics.isEmpty {
+                    Text("최근 요청 오류가 있습니다 · 상태·진단에서 원인과 해결 방법을 확인하세요")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if !direct.ready || direct.failed {
                     Button(direct.starting ? "프록시 시작 중…" : (direct.ready && direct.failed ? "사용 가능한 계정으로 복구 준비" : "모델 프록시 다시 연결")) {
@@ -426,6 +471,11 @@ struct MenuPanel: View {
             Text(store.demo ? sessionDetail : direct.ready ? direct.message : store.sessionsConnected ? store.selectedSession?.detail ?? "새 CLI 실행을 기다리고 있습니다." : "연결이 끊겨 활성 여부를 확인할 수 없습니다.")
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
+            if !store.demo, let authentication = direct.authenticationMessage {
+                Text(authentication).font(.caption.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(direct.authenticationGuidance ?? "")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -450,7 +500,7 @@ struct MenuPanel: View {
     private func accountCard(_ account: AccountSnapshot) -> some View {
         let stale = account.isStale(at: store.now)
         let selected = store.demo ? account.slot == "a" : direct.ready && direct.slot == account.slot
-        let canLogout = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
+        let canLogout = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.allBusy
             && account.canLogoutAccount
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
@@ -465,7 +515,7 @@ struct MenuPanel: View {
             if !store.demo {
                 if let command = AccountLogin.command(for: account.state), command == "reauth" {
                     Button(command == "login" ? "계정 연결 · 브라우저 로그인" : "다시 로그인") { store.connectAccount(account) }
-                        .disabled(store.helper == nil || direct.usageRefreshing || login.busy || direct.busy)
+                        .disabled(store.helper == nil || direct.usageRefreshing || login.busy || direct.allBusy)
                 }
                 if account.state == "auth_error" {
                     Text("등록 해제를 뜻하지 않습니다. Keychain 접근 승인과 인증 상태를 확인하세요.")
@@ -506,7 +556,7 @@ struct MenuPanel: View {
     }
 
     private func logoutPanel(_ slot: String) -> some View {
-        let allowed = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.busy
+        let allowed = store.helper != nil && !direct.usageRefreshing && !login.busy && !direct.allBusy
             && store.accounts.contains { $0.slot == slot && $0.canLogoutAccount }
         return VStack(alignment: .leading, spacing: 6) {
             Text("계정 \(slot.uppercased()) 연결을 해제할까요?").font(.subheadline.weight(.semibold))
@@ -638,5 +688,55 @@ struct CodexSettingsPanel: View {
         .onChange(of: direct.home) { home in
             if !settings.dirty { settings.load(home: home) }
         }
+    }
+}
+
+struct ProxyDiagnosticsPanel: View {
+    @ObservedObject var direct: DirectProxyStore
+    var back: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button("계정 목록으로", action: back)
+                Spacer()
+                Text("상태·진단").font(.headline)
+                Spacer()
+                Button("진단 복사") { direct.copyDiagnostics() }
+            }
+            Text(direct.ready ? (direct.busy ? "프록시 연결됨 · 작업 중" : "프록시 연결됨") : "프록시 연결 미확인")
+            Text("앱: \(direct.appVersion) · \(direct.auxiliaryCapacityText)")
+            Text(direct.authenticationText)
+            if let guidance = direct.authenticationGuidance {
+                Text(guidance).font(.caption).foregroundStyle(.secondary)
+            }
+            Text("연결 시 helper: \(direct.helperBuild.map { String($0.prefix(12)) } ?? "미확인")")
+            Text("실행 프록시: \(direct.proxyBuild.map { String($0.prefix(12)) } ?? "미확인")")
+            if let warning = direct.buildWarning {
+                Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            } else if direct.ready {
+                Text("연결 시 helper와 실행 프록시의 빌드가 일치합니다.").foregroundStyle(.secondary)
+            }
+            Text("빌드 정보는 연결 시 확인합니다. 재빌드 후에는 다시 연결해 확인하세요.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text(direct.diagnosticsFromPreviousConnection ? "마지막 오류 · 이전 연결 기록" : "마지막 오류 · 대화별 최근 1건").font(.headline)
+            if direct.diagnostics.isEmpty {
+                Text("수집된 오류가 없습니다. 구버전 프록시나 재시작 전의 오류는 표시되지 않을 수 있습니다.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(direct.diagnostics) { diagnostic in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(diagnostic.scopeLabel) · \(diagnostic.title)").fontWeight(.medium)
+                    Text(diagnostic.guidance)
+                    Text("\(diagnostic.code) · \(diagnostic.at)").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Text("오류 기록은 현재 작업의 실패 여부와 별개입니다. 진단 복사에는 토큰·계정 식별자·로컬 경로·대화 내용이 포함되지 않습니다.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(18)
+        .frame(width: 620)
     }
 }

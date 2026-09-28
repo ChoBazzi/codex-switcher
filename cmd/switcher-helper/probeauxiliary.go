@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -18,16 +19,28 @@ import (
 // This prevents replay of interrupted background work without user input.
 type probeAuxiliaryBinding struct{ Thread, Root, Slot string }
 type probeAuxiliary struct {
+	quotaAlternative      func(map[string]bool) string // caller holds the connection mutex
+	portableBoundary      [32]byte
 	binding               probeAuxiliaryBinding
 	handler               *proxy.Handler
 	busy, pending, failed bool
+	restored              bool
 	finishing             bool
 	done                  chan struct{}
 	credential            [32]byte
 	lastBody              [32]byte
+	reasoning             probeReasoningOwners
+	agentOwners           *probeAgentOwners
+	report                func(any)
 }
 
 func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.Mutex, access probeAccess, upstream, salt string, changed func() bool, begin func() error) {
+	reject := func(code string, status int) {
+		if a.report != nil {
+			a.report(map[string]any{"event": "probe_auxiliary_finished", "code": code, "last_http_status": status})
+		}
+		http.Error(w, code, status)
+	}
 	waited := false
 	mu.Lock()
 	if a.busy && a.finishing {
@@ -39,29 +52,32 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		case <-r.Context().Done():
 			return
 		case <-time.After(30 * time.Second):
-			http.Error(w, "probe_request_wait_timeout", 409)
+			reject("probe_request_wait_timeout", 409)
 			return
 		}
 		mu.Lock()
 	}
 	if a.failed || a.busy {
 		code := "probe_previous_request_failed"
+		if a.restored {
+			code = "probe_auxiliary_restart_required"
+		}
 		if a.busy {
 			code = "probe_request_in_progress"
 		}
 		mu.Unlock()
-		http.Error(w, code, 409)
+		reject(code, 409)
 		return
 	}
 	if r.URL.Path != "/responses" {
 		mu.Unlock()
-		http.Error(w, "probe_auxiliary_compaction_unsupported", 409)
+		reject("probe_auxiliary_compaction_unsupported", 409)
 		return
 	}
 	if begin != nil {
 		if err := begin(); err != nil {
 			mu.Unlock()
-			http.Error(w, "account_operation_busy", 409)
+			reject("account_operation_busy", 409)
 			return
 		}
 	}
@@ -73,7 +89,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		close(a.done)
 
 		mu.Unlock()
-		http.Error(w, "proxy_checkpoint_unavailable", 503)
+		reject("proxy_checkpoint_unavailable", 503)
 		return
 	}
 	mu.Unlock()
@@ -91,10 +107,10 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 
 		changed()
 	}()
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
-	r.Body.Close()
+	body, err := readProbeBody(w, r)
 	if err != nil {
-		http.Error(w, "probe_tool_history_unsupported", 409)
+		status, code := probeBodyRejection(err)
+		reject(code, status)
 		return
 	}
 	hash := sha256.Sum256(body)
@@ -106,7 +122,7 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 	mu.Unlock()
 	if duplicate {
 		success = true
-		http.Error(w, "probe_duplicate_followup", 409)
+		reject("probe_duplicate_followup", 409)
 		return
 	}
 	// A new branch may contain parent reasoning; reject it unless this handler has
@@ -117,47 +133,178 @@ func (a *probeAuxiliary) serve(w http.ResponseWriter, r *http.Request, mu *sync.
 		previous = a.binding.Slot
 	}
 	mu.Unlock()
-	body, err = probeToolBody(body, a.binding.Slot, previous, salt+":"+a.binding.Thread)
+	originalBody := append([]byte(nil), body...)
+	parsedInput := parseProbeToolInput(body)
+	boundary, _ := probeItemsUserBoundary(parsedInput.items)
+	mu.Lock()
+	parsedInput.portable = a.portableBoundary != ([32]byte{}) && a.portableBoundary == boundary
+	mu.Unlock()
+	// Validate against current authentication before preserving opaque messages;
+	// pin it below so the resolver also checks any dispatch-time refresh/change.
+	var agentCredential [32]byte
+	if a.agentOwners != nil {
+		agentCredential, err = probeHistoryCredential(access, a.binding.Slot)
+		if err != nil {
+			status, code := probeAuthenticationRejection(err)
+			reject(code, status)
+			return
+		}
+		parsedInput.agentOwner = func(content string) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return a.agentOwners.permits(content, agentCredential)
+		}
+	}
+	body, err = parsedInput.normalize(a.binding.Slot, previous, salt+":"+a.binding.Thread, nil, func(item map[string]json.RawMessage) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return a.reasoning.permits(item, a.credential)
+	})
 	if err != nil {
+		detail := ""
+		var parsed *probeBodyError
+		if errors.As(err, &parsed) {
+			detail = parsed.Reason
+		}
+		if a.report != nil {
+			a.report(struct {
+				Event string `json:"event"`
+				proxy.Diagnostics
+			}{"probe_auxiliary_finished", proxy.Diagnostics{Status: 409, Rejection: "probe_tool_history_unsupported", RejectionDetail: detail}})
+		}
 		http.Error(w, "probe_tool_history_unsupported", 409)
 		return
 	}
-	mu.Lock()
-	if a.handler == nil {
-		a.handler, err = proxy.New(upstream, func(_ *http.Request) (proxy.Identity, error) {
-			c, e := usage.RequestAccess(access, a.binding.Slot, time.Now())
+	if parsedInput.needsAgentOwner {
+		mu.Lock()
+		valid := agentCredential != ([32]byte{}) && (a.credential == ([32]byte{}) || a.credential == agentCredential)
+		if valid {
+			a.credential = agentCredential
+		}
+		mu.Unlock()
+		if !valid {
+			reject("agent_message_owner_unavailable", 409)
+			return
+		}
+	}
+	makeHandler := func() (*proxy.Handler, error) {
+		next, e := proxy.New(upstream, func(request *http.Request) (proxy.Identity, error) {
+			c, e := usage.RequestAccessContext(request.Context(), access, a.binding.Slot, time.Now())
 			if e != nil {
-				return proxy.Identity{}, e
+				return proxy.Identity{}, probeAccessError(e)
 			}
-			hash := sha256.Sum256([]byte(c.Token))
+			hash := c.HistoryCredential()
 			mu.Lock()
 			defer mu.Unlock()
-			if a.credential != ([32]byte{}) && a.credential != hash {
-				return proxy.Identity{}, errors.New("auxiliary_credential_changed")
+			if hash == ([32]byte{}) || a.credential != ([32]byte{}) && a.credential != hash {
+				return proxy.Identity{}, proxy.ErrAuxiliaryCredential
 			}
 			a.credential = hash
 			return proxy.Identity{Session: a.binding.Thread, Token: c.Token, AccountID: c.AccountID}, nil
 		})
+		if next != nil {
+			next.DeferUsageLimit = a.quotaAlternative != nil
+		}
+		return next, e
+	}
+	mu.Lock()
+	if a.handler == nil {
+		a.handler, err = makeHandler()
 	}
 	h := a.handler
 	mu.Unlock()
 	if err != nil {
-		http.Error(w, "probe_auxiliary_unavailable", 503)
+		reject("probe_auxiliary_unavailable", 503)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.ContentLength = int64(len(body))
-	turn := &probeTurnWriter{ResponseWriter: w, holdTerminal: true}
-	h.ServeHTTP(turn, r)
+	var turn *probeTurnWriter
+	tried := map[string]bool{}
+	for {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		turn = &probeTurnWriter{ResponseWriter: w, holdTerminal: true}
+		tried[a.binding.Slot] = true
+		h.ServeHTTP(turn, r)
+		d := h.Diagnostics()
+		if !d.UsageLimit {
+			break
+		}
+		mu.Lock()
+		nextSlot := ""
+		if a.quotaAlternative != nil && r.Context().Err() == nil {
+			nextSlot = a.quotaAlternative(tried)
+		}
+		mu.Unlock()
+		if nextSlot == "" {
+			writeProbeUsageLimit(w)
+			break
+		}
+		credential, accessErr := probeHistoryCredential(access, nextSlot)
+		if accessErr != nil || credential == ([32]byte{}) {
+			writeProbeUsageLimit(w)
+			break
+		}
+		portable := parseProbeToolInput(originalBody)
+		portable.portable = true
+		nextBody, bodyErr := portable.normalize(nextSlot, "", salt+":"+a.binding.Thread, nil, nil)
+		if bodyErr != nil {
+			writeProbeUsageLimit(w)
+			break
+		}
+		replacement, createErr := makeHandler()
+		if createErr != nil {
+			writeProbeUsageLimit(w)
+			break
+		}
+		mu.Lock()
+		a.binding.Slot = nextSlot
+		a.credential = credential
+		a.portableBoundary = boundary
+		stored := changed()
+		mu.Unlock()
+		if !stored {
+			replacement.Close()
+			reject("proxy_checkpoint_unavailable", 503)
+			break
+		}
+		h.Close()
+		h = replacement
+		mu.Lock()
+		a.handler = h
+		mu.Unlock()
+		body = nextBody
+	}
 	d := h.Diagnostics()
 	success = d.Status == 200 && d.ResponseFailure == "" && d.Rejection == "" && turn.valid()
 	mu.Lock()
+	if success && !a.reasoning.accept(turn.reasoning, a.credential, boundary) {
+		success = false
+	}
+	if success && a.agentOwners != nil && !a.agentOwners.accept(turn.agentMessages, a.credential) {
+		success = false
+		d.ResponseFailure = "agent_message_owner_unavailable"
+	}
+	// Persist verified outgoing task ownership before the CLI can dispatch it.
+	if success && len(turn.agentMessages) > 0 && !changed() {
+		success = false
+		d.ResponseFailure = "proxy_checkpoint_unavailable"
+	}
 	a.pending = success && turn.pending()
 	a.finishing = success
 	mu.Unlock()
 	if success {
 		if turn.release() != nil {
 			success = false
+			d.ResponseFailure = "probe_client_write_failed"
 		}
+	}
+	if !success && a.report != nil {
+		if d.Status == 200 && d.ResponseFailure == "" && d.Rejection == "" {
+			d.ResponseFailure = "probe_tool_response_unsupported"
+		}
+		a.report(struct {
+			Event string `json:"event"`
+			proxy.Diagnostics
+		}{"probe_auxiliary_finished", d})
 	}
 }

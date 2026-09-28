@@ -1,8 +1,14 @@
 # ADR 0055: 프록시 재시작 후 같은 CLI 대화 복구
 
+2026-09-22: [ADR 0070](0070-multiple-cli-connections.md)이 하나의 daemon에서 최대 5개 독립 연결을 관리하도록 확장한다. 연결별 루트·이력 격리와 단일 사용량 조회는 유지한다.
+
 - 상태: accepted (전체 Go·설치 CLI·Swift/UI 합성 검증 통과)
 - 날짜: 2026-09-11
 - 관련: ADR 0054, 0049, 0048, 0045, 0043
+
+2026-09-21: [ADR 0061](0061-authenticated-history-ownership.md)에서 이력 소유권을 계정·사용자 신원, 로그인 등록 세대와 실제 dispatch 인증 해시로 강화했다. 아래 슬롯 또는 토큰 전용 소유권 설명은 해당 결정을 따른다.
+
+2026-09-21: [ADR 0066](0066-request-preparation-performance.md)은 변경 없는 checkpoint 비교에 기존 소유권 registry를 재사용한다. 동기 저장 시점·fsync·저장 실패 차단과 checkpoint 형식은 유지한다.
 
 ## 배경과 선택지
 

@@ -4,6 +4,8 @@
 - 날짜: 2026-09-14
 - 관련: ADR 0054, 0055, 0058
 
+제어 relay 종료 직후 쓰기 경쟁으로 앱이 종료되는 문제는 [ADR 0060](0060-relay-broken-pipe-recovery.md)에서 보완한다. 실패한 종료 명령을 성공으로 추정하거나 재전송하지 않는 계약은 유지한다.
+
 ## 결정
 
 사용자는 앱만 관리한다. 앱 시작 시 기존 proxy-connect 경로로 서비스를 시작하거나 연결한다. 정상 앱 종료 시 현재 relay에 shutdown(new_session=false)을 한 번 보내고, 성공 ACK와 연결 종료를 확인한 뒤 앱을 종료한다. 독립 daemon 구조와 checkpoint 복구 계약은 유지한다. ADR 0054의 정상 앱 종료 시 daemon을 남기는 기본 동작을 대체한다.

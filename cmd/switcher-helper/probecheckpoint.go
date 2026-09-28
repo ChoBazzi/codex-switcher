@@ -20,13 +20,16 @@ var errCheckpoint = errors.New("proxy_checkpoint_unavailable")
 // No request/response bodies, OAuth credentials or account identifiers are stored.
 // Secret is only the local CLI-to-proxy capability, already present in config.toml.
 type probeCheckpoint struct {
-	Auxiliary                                           []probeAuxiliaryBinding `json:",omitempty"`
+	Auxiliary                                           []probeAuxiliaryBinding     `json:",omitempty"`
+	AgentOwners                                         []probeCheckpointAgentOwner `json:",omitempty"`
 	Retired                                             bool
+	Deleted                                             bool `json:",omitempty"`
 	Version                                             int
 	Address, Home, Secret                               string
 	Session, Slot, PreviousSlot                         string
 	Chosen, Busy, Failed, TurnPending, RecoveryRequired bool
 	LastBody, LastUser                                  [32]byte
+	PreviousCredential                                  [32]byte
 	Revision                                            uint64
 	OpaqueSlot                                          string
 	Owners                                              []probeCheckpointOwner
@@ -77,7 +80,17 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		}
 	}
 	seenAux := map[string]bool{}
-	if len(c.Auxiliary) > 128 {
+	if len(c.AgentOwners) > probeAgentOwnerLimit {
+		return nil, errCheckpoint
+	}
+	seenAgent := map[probeCheckpointAgentOwner]bool{}
+	for _, owner := range c.AgentOwners {
+		if owner.Message == ([32]byte{}) || owner.Credential == ([32]byte{}) || seenAgent[owner] {
+			return nil, errCheckpoint
+		}
+		seenAgent[owner] = true
+	}
+	if len(c.Auxiliary) > probeAuxiliaryLimit {
 		return nil, errCheckpoint
 	}
 	for _, a := range c.Auxiliary {
@@ -87,7 +100,7 @@ func readProbeCheckpoint(dir string) (*probeCheckpoint, error) {
 		}
 		seenAux[a.Thread] = true
 	}
-	if c.Retired {
+	if c.Retired && !c.Deleted {
 		return nil, nil
 	}
 	return &c, nil
@@ -146,24 +159,22 @@ func writeProbeProfile(path string, data []byte) error {
 
 // Registry iteration order is irrelevant; compare all persisted fields without
 // retaining another copy of credentials or treating a status poll as a change.
-func sameProbeCheckpoint(a, b *probeCheckpoint) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	left, right := *a, *b
-	left.Owners, right.Owners = nil, nil
-	if !reflect.DeepEqual(left, right) || len(a.Owners) != len(b.Owners) {
+// last is exclusively the last successfully written snapshot built from the
+// unique-key registry, never an unvalidated checkpoint read from disk.
+func sameProbeCheckpointRegistry(last, next *probeCheckpoint, owners probeCompactRegistry) bool {
+	if last == nil || next == nil || len(last.Owners) != len(owners) {
 		return false
 	}
-	owners := make(map[probeCheckpointOwner]int, len(a.Owners))
-	for _, owner := range a.Owners {
-		owners[owner]++
+	left, right := *last, *next
+	left.Owners, right.Owners = nil, nil
+	if !reflect.DeepEqual(left, right) {
+		return false
 	}
-	for _, owner := range b.Owners {
-		if owners[owner] == 0 {
+	for _, saved := range last.Owners {
+		owner, ok := owners[saved.Key]
+		if !ok || owner.slot != saved.Slot || owner.credential != saved.Credential {
 			return false
 		}
-		owners[owner]--
 	}
 	return true
 }

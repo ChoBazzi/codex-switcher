@@ -3,13 +3,13 @@ package accounts
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"github.com/ChoBazzi/codex-switcher/internal/accountslot"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -44,9 +44,11 @@ type Runner interface {
 	Run(context.Context, string, func()) error
 }
 type record struct {
-	Slot           string      `json:"slot"`
-	Credentials    Credentials `json:"credentials"`
-	RefreshBlocked bool        `json:"refresh_blocked,omitempty"`
+	Slot           string          `json:"slot"`
+	Credentials    Credentials     `json:"credentials"`
+	RefreshBlocked bool            `json:"refresh_blocked,omitempty"`
+	Registration   string          `json:"registration,omitempty"`
+	History        *historyBinding `json:"history,omitempty"`
 }
 type registry struct {
 	Version  int      `json:"version"`
@@ -61,10 +63,13 @@ type Status struct {
 
 // Callers must additionally hold the application process lock for mutations.
 type Manager struct {
-	mu         sync.Mutex
-	vault      credentialstore.Vault
-	tempParent string
-	refresher  Refresher
+	authentication authenticationProgress
+	operationMu    operationLock // Credential mutations serialize; request waiters can cancel.
+	mu             operationLock // Local credential reads/writes; request waiters can cancel.
+	refreshSlot    string        // guarded by mu; the durable blocked marker remains authoritative on restart
+	vault          credentialstore.Vault
+	tempParent     string
+	refresher      Refresher
 }
 
 func New(v credentialstore.Vault, tempParent string) *Manager {
@@ -87,6 +92,9 @@ func (m *Manager) read() (registry, error) {
 	slots := map[string]bool{}
 	for i, a := range r.Accounts {
 		c := a.Credentials
+		if a.Registration != "" && !safeValue(a.Registration, 256) {
+			return registry{}, ErrStore
+		}
 		if !validSlot(a.Slot) || slots[a.Slot] || !safeValue(c.AccountID, 256) || !safeValue(c.AccessToken, 32<<10) || !safeValue(c.RefreshToken, 8192) || !safeValue(c.IDToken, 32<<10) || c.ExpiresAt.IsZero() {
 			return registry{}, ErrStore
 		}
@@ -135,6 +143,8 @@ func (m *Manager) Status() ([]Status, error) {
 // Logout forgets one slot only. The caller holds the account operation lock
 // and invalidates that slot's routing before replacing credentials.
 func (m *Manager) Logout(slot string) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !validSlot(slot) {
@@ -179,7 +189,7 @@ func (m *Manager) Access(slot string, now time.Time) (Access, error) {
 			if a.RefreshBlocked || !a.Credentials.ExpiresAt.After(now.Add(30*time.Second)) {
 				return Access{}, ErrExpired
 			}
-			return Access{Token: a.Credentials.AccessToken, AccountID: a.Credentials.AccountID, ExpiresAt: a.Credentials.ExpiresAt}, nil
+			return a.access(), nil
 		}
 	}
 	return Access{}, ErrNotRegistered
@@ -188,6 +198,14 @@ func (m *Manager) Access(slot string, now time.Time) (Access, error) {
 type Access struct {
 	Token, AccountID string
 	ExpiresAt        time.Time
+	UserID           string `json:"-"`
+	Registration     string `json:"-"`
+	history          *historyBinding
+}
+
+func (r record) access() Access {
+	return Access{Token: r.Credentials.AccessToken, AccountID: r.Credentials.AccountID,
+		ExpiresAt: r.Credentials.ExpiresAt, UserID: r.Credentials.UserID, Registration: r.Registration, history: r.History}
 }
 
 func (Access) String() string   { return "[redacted access]" }
@@ -202,6 +220,8 @@ func (m *Manager) Reauthenticate(ctx context.Context, slot string, runner Runner
 }
 
 func (m *Manager) login(ctx context.Context, slot string, runner Runner, report func(State), replace bool) (err error) {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if report == nil {
@@ -306,8 +326,10 @@ func (m *Manager) login(ctx context.Context, slot string, runner Runner, report 
 	if replace {
 		r.Accounts[index].Credentials = c
 		r.Accounts[index].RefreshBlocked = false
+		r.Accounts[index].Registration = rand.Text()
+		r.Accounts[index].History = nil
 	} else {
-		r.Accounts = append(r.Accounts, record{Slot: slot, Credentials: c})
+		r.Accounts = append(r.Accounts, record{Slot: slot, Credentials: c, Registration: rand.Text()})
 	}
 	encoded, err := json.Marshal(r)
 	if err != nil {

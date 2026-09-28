@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -524,4 +525,28 @@ func TestProbeCheckpointComparison(t *testing.T) {
 	if sameProbeCheckpoint(nil, a) {
 		t.Fatal("initial save skipped")
 	}
+}
+
+// Reference snapshot comparison retained to verify the optimized registry path.
+
+func sameProbeCheckpoint(a, b *probeCheckpoint) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	left, right := *a, *b
+	left.Owners, right.Owners = nil, nil
+	if !reflect.DeepEqual(left, right) || len(a.Owners) != len(b.Owners) {
+		return false
+	}
+	owners := make(map[probeCheckpointOwner]int, len(a.Owners))
+	for _, owner := range a.Owners {
+		owners[owner]++
+	}
+	for _, owner := range b.Owners {
+		if owners[owner] == 0 {
+			return false
+		}
+		owners[owner]--
+	}
+	return true
 }

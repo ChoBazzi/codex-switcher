@@ -24,8 +24,15 @@ import (
 )
 
 func main() {
-	if (len(os.Args) == 2 || (len(os.Args) == 3 && os.Args[2] == "--new-session")) && os.Args[1] == "proxy-stop" {
-		if err := proxyStopSession(len(os.Args) == 3); err != nil {
+	if len(os.Args) >= 2 && os.Args[1] == "proxy-stop" {
+		f := flag.NewFlagSet("proxy-stop", flag.ContinueOnError)
+		newSession := f.Bool("new-session", false, "retire the selected connection while stopping all connections")
+		connection := f.String("connection", "1", "connection number (1-5)")
+		if f.Parse(os.Args[2:]) != nil || f.NArg() != 0 || !validConnectionID(*connection) {
+			fmt.Fprintln(os.Stderr, "usage: proxy-stop [--new-session] [--connection 1-5]")
+			os.Exit(1)
+		}
+		if err := proxyStopConnection(*newSession, *connection); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

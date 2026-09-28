@@ -2,12 +2,33 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ChoBazzi/codex-switcher/internal/accounts"
 )
+
+type canceledRefreshSource struct{ renewableSource }
+
+func (s *canceledRefreshSource) RequestAccessContext(ctx context.Context, _ string, _ time.Time) (accounts.Access, error) {
+	s.remote.Add(1)
+	<-ctx.Done()
+	return accounts.Access{}, ctx.Err()
+}
+
+func TestRequestAccessContextPropagation(t *testing.T) {
+	s := &canceledRefreshSource{}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := RequestAccessContext(ctx, s, "a", time.Now()); !errors.Is(err, context.DeadlineExceeded) || s.remote.Load() != 1 || s.local.Load() != 0 {
+		t.Fatal("context-aware source not used")
+	}
+	if _, err := RequestAccessContext(ctx, s, "a", time.Now()); !errors.Is(err, context.DeadlineExceeded) || s.remote.Load() != 1 {
+		t.Fatal("pre-canceled request queried source")
+	}
+}
 
 type renewableSource struct {
 	local, remote atomic.Int32

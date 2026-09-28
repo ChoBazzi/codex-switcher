@@ -31,11 +31,14 @@ func probeCompactKey(item map[string]json.RawMessage) ([32]byte, bool) {
 func (owners probeCompactRegistry) permits(item map[string]json.RawMessage, slot string, credential [32]byte) bool {
 	key, ok := probeCompactKey(item)
 	owner, known := owners[key]
-	return ok && known && owner.slot == slot && owner.credential == credential
+	return ok && known && credential != ([32]byte{}) && owner.slot == slot && owner.credential == credential
 }
 
 func (owners probeCompactRegistry) accept(body []byte, slot string, credential [32]byte) error {
 	bad := errors.New("compaction_response_invalid")
+	if credential == ([32]byte{}) {
+		return bad
+	}
 	var response struct {
 		Object string                       `json:"object"`
 		Output []map[string]json.RawMessage `json:"output"`
@@ -63,20 +66,4 @@ func (owners probeCompactRegistry) accept(body []byte, slot string, credential [
 		owners[key] = probeCompactOwner{slot, credential}
 	}
 	return nil
-}
-
-func probeCompactItems(body []byte) []map[string]json.RawMessage {
-	var p struct {
-		Input []map[string]json.RawMessage `json:"input"`
-	}
-	if json.Unmarshal(body, &p) != nil {
-		return nil
-	}
-	var items []map[string]json.RawMessage
-	for _, item := range p.Input {
-		if probeString(item, "type") == "compaction" {
-			items = append(items, item)
-		}
-	}
-	return items
 }

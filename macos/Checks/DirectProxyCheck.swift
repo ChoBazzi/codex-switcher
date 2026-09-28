@@ -1,8 +1,257 @@
 import Foundation
+import Darwin
 
 @main
 struct DirectProxyCheck {
+    private static let brokenRelayDirectoryKey = "SWITCHER_CHECK_BROKEN_RELAY_DIRECTORY"
+
+    private static func trace(_ event: String, directory: URL) throws {
+        let url = directory.appendingPathComponent("relay-\(getpid()).log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            precondition(FileManager.default.createFile(atPath: url.path, contents: nil))
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((event + "\n").utf8))
+    }
+
+    @MainActor private static func waitFor(_ condition: () -> Bool) async throws {
+        for _ in 0..<150 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        fatalError("direct proxy check timed out")
+    }
+
+    private static func assertDefaultSIGPIPE() {
+        var disposition = sigaction()
+        precondition(sigaction(SIGPIPE, nil, &disposition) == 0)
+        precondition(unsafeBitCast(disposition.__sigaction_u.__sa_handler, to: UInt.self) == 0,
+                     "relay protection must preserve the process-wide default SIGPIPE disposition")
+    }
+
+    @MainActor private static func checkBrokenRelay(_ action: String, directory: URL) async throws {
+        signal(SIGPIPE, SIG_DFL)
+        assertDefaultSIGPIPE()
+        func logs() -> [String] {
+            let files = try! FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            return files.filter { $0.pathExtension == "log" }.map { try! String(contentsOf: $0, encoding: .utf8) }
+        }
+        let store = DirectProxyStore(usageReadTimeout: 10_000_000_000)
+        var invalidations = 0
+        var shutdownResults: [Bool] = []
+        store.onUsageUnavailable = { invalidations += 1 }
+        let helper = URL(fileURLWithPath: CommandLine.arguments[0])
+        store.start(helper: helper)
+        try await waitFor { store.ready }
+        precondition(store.auxiliaryCount == 127 && store.auxiliaryLimit == 128 && store.auxiliaryCapacityText.contains("1개 가능"))
+        if action != "refresh" {
+            // Leave a real usage request pending when a different command loses the relay.
+            store.readUsage()
+            try await waitFor { store.usageRefreshMessage == "사용량 조회 중…" && logs().contains { $0.contains("closed\n") } }
+        }
+        let previousInvalidations = invalidations
+        switch action {
+        case "poll":
+            store.busy = true // The last busy observation must be cleared on disconnect.
+            store.poll()
+        case "select": store.select("b")
+        case "refresh": store.readUsage()
+        case "shutdown": store.shutdownService { shutdownResults.append($0) }
+        default: fatalError("unknown broken relay action")
+        }
+        precondition(!store.ready && !store.starting && !store.pending && !store.busy && !store.connected)
+        precondition(store.home == nil && !store.stopping && !store.canReadUsage && !store.usageRefreshing)
+        precondition(store.message.contains("연결 끊김") && invalidations > previousInvalidations)
+        precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        assertDefaultSIGPIPE()
+        store.poll()
+        store.select("b")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        precondition(logs().count == 1, "a failed command must not relaunch its relay")
+        let oldLog = logs()[0]
+        precondition(!oldLog.contains("command:status") && !oldLog.contains("command:select") && !oldLog.contains("command:shutdown"))
+        precondition(oldLog.components(separatedBy: "command:usage_refresh").count - 1 == (action == "refresh" ? 0 : 1))
+
+        // Only an explicit reconnect may start another helper. Its log must contain no replay.
+        try Data().write(to: directory.appendingPathComponent("healthy"))
+        store.start(helper: helper)
+        try await waitFor { store.ready && logs().count == 2 }
+        precondition(store.slot == "a" && !store.busy && !store.pending && !store.usageRefreshing)
+        precondition(logs().first { $0.hasPrefix("healthy\n") } == "healthy\n")
+        let reconnectedInvalidations = invalidations
+        try Data().write(to: directory.appendingPathComponent("release-old-relay"))
+        try await waitFor { logs().contains { $0.contains("released\n") } }
+        // The old helper emits stale state, a shutdown ACK and EOF after the new relay is ready.
+        for _ in 0..<10 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            precondition(store.ready && store.slot == "a" && !store.busy && !store.pending)
+            precondition(invalidations == reconnectedInvalidations)
+            precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        }
+        store.select("b")
+        try await waitFor { store.slot == "b" && !store.pending }
+        var finished: Bool?
+        store.shutdownService { finished = $0 }
+        try await waitFor { finished != nil }
+        precondition(finished == true && !store.ready)
+        precondition(shutdownResults == (action == "shutdown" ? [false] : []))
+        assertDefaultSIGPIPE()
+    }
+
+    @MainActor private static func checkBrokenRelaySubprocesses() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("broken-relay-check-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var children: [Process] = []
+        defer { children.filter(\.isRunning).forEach { $0.terminate() } }
+        for action in ["poll", "select", "refresh", "shutdown"] {
+            let fixture = directory.appendingPathComponent(action)
+            try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            process.arguments = ["--broken-relay-check", action]
+            var environment = ProcessInfo.processInfo.environment
+            environment[brokenRelayDirectoryKey] = fixture.path
+            process.environment = environment
+            try process.run()
+            children.append(process)
+        }
+        try await waitFor { children.allSatisfy { !$0.isRunning } }
+        for process in children {
+            precondition(process.terminationReason == .exit && process.terminationStatus == 0,
+                         "broken relay \(process.arguments!.last!) failed: \(process.terminationReason), \(process.terminationStatus)")
+        }
+        print("PASS: broken relay poll/select/refresh/shutdown survive default SIGPIPE, detach without replay, reconnect explicitly and ignore stale EOF")
+    }
+
+    @MainActor private static func checkDiagnostics() {
+        let store = DirectProxyStore()
+        func event(_ object: [String: Any]) {
+            store.receiveDiagnosticEvent(try! JSONSerialization.data(withJSONObject: object))
+        }
+        let old = String(repeating: "a", count: 64), new = String(repeating: "b", count: 64)
+        store.ready = true
+        precondition(store.buildWarning != nil)
+        event(["event":"helper_build", "build_id":new, "protocol_version":1])
+        event(["event":"probe_ready", "build_id":new, "protocol_version":1])
+        precondition(store.buildWarning == nil && store.helperBuild == new && store.proxyBuild == new)
+        event(["event":"probe_ready", "build_id":old, "protocol_version":1])
+        precondition(store.buildWarning!.contains("다릅니다"))
+        event(["event":"probe_ready", "build_id":new, "protocol_version":99])
+        precondition(store.buildWarning!.contains("제어 버전"))
+        event(["event":"probe_ready", "codex_home":"/synthetic-secret"])
+        precondition(store.proxyBuild == nil && store.buildWarning!.contains("확인할 수 없습니다"))
+        let at = "2026-09-21T00:00:00Z"
+        event(["event":"probe_diagnostic", "scope":"root", "code":"history_owner_unavailable", "at":at,
+               "body":"synthetic-secret", "account_id":"synthetic-secret"])
+        event(["event":"probe_diagnostic", "scope":"auxiliary", "code":"agent_message_shape_unsupported", "at":at])
+        precondition(store.diagnostics.count == 2 && store.rootDiagnostic?.code == "history_owner_unavailable")
+        precondition(store.auxiliaryDiagnostic?.title.contains("에이전트") == true)
+        event(["event":"probe_diagnostic", "scope":"root", "code":"synthetic-secret", "at":at])
+        event(["event":"probe_diagnostic", "scope":"root", "code":"history_unsupported", "at":"synthetic-secret"])
+        event(["event":"helper_build", "build_id":"/synthetic-secret"])
+        precondition(store.helperBuild == nil && store.rootDiagnostic?.code == "history_owner_unavailable")
+        precondition(!store.diagnosticText.contains("synthetic-secret"))
+        event(["event":"probe_diagnostic", "scope":"root", "code":"request_canceled", "at":at])
+        precondition(store.rootDiagnostic?.title.contains("취소") == true)
+        precondition(store.rootDiagnostic?.guidance.contains("자동으로 다시 보내지 않습니다") == true)
+        store.stop()
+        precondition(store.diagnosticsFromPreviousConnection && store.diagnostics.count == 2 && store.buildWarning == nil)
+        print("PASS: build match/mismatch/legacy protocol, diagnostic redaction, independent root/auxiliary guidance and stale connection labeling")
+    }
+
+    private static func multiRelayFixture() {
+        func emit(_ object: [String: Any]) {
+            try! FileHandle.standardOutput.write(contentsOf: JSONSerialization.data(withJSONObject: object) + Data([10]))
+        }
+        var selected = "1", count = 1
+        var deleted = false
+        func show() {
+            let rows = (1...count).map { ["id":String($0), "ready":true, "busy":$0 == 1, "failed":false] as [String: Any] }
+            emit(["event":"connection_list", "selected":selected, "connections":rows, "limit":5, "can_delete":true])
+            emit(["event":"probe_ready", "connection_id":selected, "codex_home":"/synthetic-" + selected + (deleted && selected == "2" ? "-new" : "")])
+            emit(["event":"probe_state", "connection_id":selected, "slot":selected == "1" ? "a" : "b", "busy":selected == "1", "failed":false, "connected":true, "revision":1,
+                  "conversation":"12345678-1234-4234-8234-12345678900" + selected])
+        }
+        show()
+        while let line = readLine(), let data = line.data(using: .utf8),
+              let command = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            switch command["action"] as? String {
+            case "connection_create": count += 1; selected = String(count); show(); emit(["event":"connection_result", "accepted":true])
+            case "connection_select": selected = command["connection_id"] as! String; show(); emit(["event":"connection_result", "accepted":true])
+            case "connection_delete":
+                precondition(command["connection_id"] as? String == "2" && selected == "2")
+                precondition(command["expected_home"] as? String == "/synthetic-2")
+                precondition(command["revision"] as? Int == 1 && !deleted)
+                deleted = true; count = 1; selected = "1"
+                emit(["event":"connection_list", "selected":"", "connections":[], "limit":5, "can_delete":true])
+                show()
+                emit(["event":"connection_result", "action":"connection_delete", "accepted":true])
+            case "status":
+                show()
+                // An out-of-date, differently tagged frame must not replace the selection.
+                emit(["event":"probe_state", "connection_id":"5", "slot":"e", "busy":false, "failed":true, "connected":true, "revision":99])
+            case "select":
+                precondition(command["connection_id"] as? String == selected)
+                emit(["event":"probe_selection", "connection_id":selected, "slot":command["slot"]!, "busy":false, "failed":false, "connected":true, "revision":2, "accepted":true])
+            case "shutdown": emit(["event":"probe_shutdown", "accepted":false])
+            default: break
+            }
+        }
+    }
+
+    @MainActor private static func checkMultipleConnections() async throws {
+        setenv("SWITCHER_MULTI_TEST", "1", 1)
+        let store = DirectProxyStore()
+        store.start(helper: URL(fileURLWithPath: CommandLine.arguments[0]))
+        unsetenv("SWITCHER_MULTI_TEST")
+        try await waitFor { store.ready }
+        precondition(store.busy && store.canAddConnection && !store.canDeleteConnection)
+        store.addConnection()
+        try await waitFor { store.ready && !store.pending && store.selectedConnection == "2" }
+        precondition(!store.busy && store.allBusy && store.home == "/synthetic-2" && store.slot == "b")
+        precondition(store.canSelect("c"))
+        precondition(DirectProxyStore.connectionCommand(home: store.home!, resume: true, conversation: store.conversation).hasSuffix("resume 12345678-1234-4234-8234-123456789002"))
+        store.select("c")
+        try await waitFor { !store.pending && store.slot == "c" }
+        store.poll()
+        try await waitFor { store.slot == "b" }
+        precondition(!store.failed && store.selectedConnection == "2" && store.allBusy)
+        store.chooseConnection("1")
+        try await waitFor { !store.pending && store.home == "/synthetic-1" }
+        precondition(store.busy && store.slot == "a")
+        store.chooseConnection("2")
+        try await waitFor { !store.pending && store.home == "/synthetic-2" }
+        var stopped: Bool?
+        store.shutdownService { stopped = $0 }
+        try await waitFor { stopped != nil }
+        precondition(stopped == false && store.ready)
+        precondition(store.canDeleteConnection && store.allBusy)
+        let confirmation = store.deletionConfirmation()!
+        store.deleteConnection(confirmation)
+        precondition(store.pending && !store.canDeleteConnection)
+        try await waitFor { !store.pending && store.selectedConnection == "1" }
+        precondition(store.connections.count == 1 && !store.canDeleteConnection && store.home == "/synthetic-1")
+        store.addConnection()
+        try await waitFor { !store.pending && store.selectedConnection == "2" }
+        precondition(store.home == "/synthetic-2-new" && store.canDeleteConnection)
+        store.deleteConnection(confirmation)
+        precondition(!store.pending) // Confirmation belongs to the deleted profile.
+        let legacy: [String: Any] = ["event":"connection_list", "selected":"2", "limit":5,
+            "connections":[["id":"2", "ready":true, "busy":false, "failed":true]]]
+        store.receiveConnections(try JSONSerialization.data(withJSONObject: legacy))
+        precondition(!store.supportsConnectionDeletion && !store.canDeleteConnection)
+        store.stop()
+        precondition(store.connections.isEmpty && store.conversation == nil)
+        print("PASS: multiple connection selection, targeted deletion, stale confirmation and legacy guards, aggregate busy, bound resume and shutdown rejection")
+    }
+
     @MainActor static func main() async throws {
+        if CommandLine.arguments.contains("proxy-connect"), ProcessInfo.processInfo.environment["SWITCHER_MULTI_TEST"] == "1" {
+            multiRelayFixture(); return
+        }
         if CommandLine.arguments.contains("proxy-connect") {
             func emit(_ value: [String: Any]) {
                 let data = try! JSONSerialization.data(withJSONObject: value)
@@ -10,12 +259,44 @@ struct DirectProxyCheck {
             }
             var slot = "a", revision = 0, toolWaiting = false, failed = false, usageReads = 0
             func state(_ event: String, _ accepted: Bool = false) {
-                emit(["event":event,"slot":slot,"busy":toolWaiting,"failed":failed,"connected":true,"revision":revision,"accepted":accepted,"can_abandon_turn":toolWaiting])
+                emit(["event":event,"slot":slot,"busy":toolWaiting,"failed":failed,"connected":true,"revision":revision,"accepted":accepted,"can_abandon_turn":toolWaiting,"auxiliary_count":127,"auxiliary_limit":128])
             }
+            let fixture = ProcessInfo.processInfo.environment[brokenRelayDirectoryKey].map { URL(fileURLWithPath: $0) }
+            let broken = fixture.map { !FileManager.default.fileExists(atPath: $0.appendingPathComponent("healthy").path) } ?? false
+            let breaksOnRefresh = broken && fixture!.lastPathComponent != "refresh"
+            if let fixture { try trace(broken ? "broken" : "healthy", directory: fixture) }
+            func closeInput() throws {
+                try FileHandle.standardInput.close()
+                try trace("closed", directory: fixture!)
+            }
+            func holdBrokenRelay() throws {
+                for _ in 0..<250 {
+                    if FileManager.default.fileExists(atPath: fixture!.appendingPathComponent("release-old-relay").path) {
+                        slot = "e"; toolWaiting = true
+                        state("probe_state")
+                        state("probe_shutdown", true)
+                        try FileHandle.standardOutput.close()
+                        try trace("released", directory: fixture!)
+                        return
+                    }
+                    Thread.sleep(forTimeInterval: 0.02)
+                }
+                fatalError("broken relay fixture was not released")
+            }
+            if broken && !breaksOnRefresh { try closeInput() }
             emit(["event":"probe_ready","codex_home":"/private/tmp/synthetic-unused-home"])
             state("probe_state")
+            if broken && !breaksOnRefresh { try holdBrokenRelay(); return }
             while let line = readLine(), let data = line.data(using: .utf8),
                   let command = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let fixture { try trace("command:" + (command["action"] as! String), directory: fixture) }
+                if breaksOnRefresh {
+                    precondition(command["action"] as? String == "usage_refresh")
+                    try closeInput()
+                    emit(["event":"usage_refresh", "request_id":command["request_id"]!, "status":"started"])
+                    try holdBrokenRelay()
+                    return
+                }
                 if command["action"] as? String == "shutdown" {
                     precondition(command["new_session"] as? Bool == false)
                     state("probe_shutdown", !toolWaiting)
@@ -62,12 +343,69 @@ struct DirectProxyCheck {
             }
             return
         }
-        func waitFor(_ condition: () -> Bool) async throws {
-            for _ in 0..<100 {
-                if condition() { return }
-                try await Task.sleep(nanoseconds: 20_000_000)
-            }
-            fatalError("direct proxy check timed out")
+        if CommandLine.arguments.contains("--broken-relay-check") {
+            let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment[brokenRelayDirectoryKey]!)
+            try await checkBrokenRelay(CommandLine.arguments.last!, directory: directory)
+            return
+        }
+        checkDiagnostics()
+        try await checkMultipleConnections()
+        let quotaDiagnostic = ProxyDiagnostic(scope: "root", code: "usage_limit_reached", at: "2026-09-22T00:00:00Z")
+        precondition(quotaDiagnostic != nil && quotaDiagnostic!.title.contains("자동 전환"))
+        let authenticationStore = DirectProxyStore()
+        authenticationStore.ready = true
+        func auth(_ value: [String: Any]) {
+            authenticationStore.receiveAuthenticationState(try! JSONSerialization.data(withJSONObject: value))
+        }
+        let waiting: [String: Any] = ["slot":"b", "waiting":2, "refreshing":false, "canceled":false]
+        let refreshing: [String: Any] = ["slot":"a", "waiting":1, "refreshing":true, "canceled":false]
+        let canceled: [String: Any] = ["slot":"a", "waiting":0, "refreshing":true, "canceled":true]
+        auth(["authentication":[waiting, refreshing], "token":"synthetic-secret"])
+        precondition(authenticationStore.authenticationMessage!.contains("토큰 갱신 중"))
+        precondition(authenticationStore.authenticationMessage!.contains("계정 B · 인증 대기 중"))
+        precondition(!authenticationStore.diagnosticText.contains("synthetic-secret"))
+        auth(["authentication":[canceled]])
+        precondition(authenticationStore.authenticationMessage!.contains("취소 후 인증 갱신 마무리"))
+        precondition(authenticationStore.authenticationGuidance!.contains("자동으로 다시 보내지 않습니다"))
+        authenticationStore.ready = false
+        precondition(authenticationStore.authenticationMessage == nil && authenticationStore.authenticationText.contains("미확인"))
+        authenticationStore.ready = true
+        for invalid: [String: Any] in [[:], ["authentication":NSNull()], ["authentication":[waiting, waiting]],
+            ["authentication":[["slot":"synthetic-secret", "waiting":1, "refreshing":false, "canceled":false]]],
+            ["authentication":[["slot":"a", "waiting":-1, "refreshing":false, "canceled":false]]],
+            ["authentication":[["slot":"a", "waiting":1, "refreshing":false, "canceled":true]]],
+            ["authentication":"synthetic-secret"]] {
+            auth(invalid)
+            precondition(authenticationStore.authentication == nil && authenticationStore.authenticationMessage == nil)
+        }
+        auth(["authentication":[]])
+        precondition(authenticationStore.authenticationText == "인증 대기·갱신 없음")
+        auth(["authentication":[refreshing]])
+        authenticationStore.stop()
+        precondition(authenticationStore.authentication == nil)
+        print("PASS: authentication waiting/refresh/canceled completion, redaction, invalid and legacy snapshots, disconnect cleanup")
+        var frames = ProxyEventFrames()
+        let wire = Data("{\"text\":\"합성\"}\n{\"event\":\"probe_state\"}\n".utf8)
+        var decoded: [Data] = []
+        // A one-byte split also cuts inside multibyte Korean characters.
+        for byte in wire { decoded += try frames.append(Data([byte])) }
+        precondition(decoded.count == 2 && String(data: decoded[0], encoding: .utf8) == "{\"text\":\"합성\"}")
+        var batch = ProxyEventFrames()
+        let batched = try batch.append(wire)
+        precondition(batched == decoded)
+        let partial = try batch.append(Data("partial".utf8))
+        precondition(partial.isEmpty)
+        var oversized = ProxyEventFrames()
+        let exact = try oversized.append(Data(repeating: 97, count: 8192))
+        precondition(exact.isEmpty)
+        let exactLine = try oversized.append(Data([10]))
+        precondition(exactLine.first?.count == 8192)
+        do {
+            _ = try oversized.append(Data(repeating: 97, count: 8193))
+            preconditionFailure("oversized relay record accepted")
+        } catch ProxyEventFrames.Failure.oversized {}
+        for code in ["request_body_timeout", "request_too_large", "request_unreadable", "credential_store_unavailable", "auxiliary_capacity_reached", "agent_message_owner_unavailable", "agent_message_portable_owner_unavailable", "auxiliary_restart_required"] {
+            precondition(ProxyDiagnostic(scope: "root", code: code, at: "2026-09-21T00:00:00Z") != nil)
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("settings-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -197,5 +535,6 @@ struct DirectProxyCheck {
         precondition(!store.usageRefreshing && store.usageRefreshMessage!.contains("연결 후"))
         precondition(unavailableCount >= 2)
         print("PASS: direct proxy selection; remote refresh protocol, duplicate suppression, timeout, old reply isolation, malformed reply, recovery and disconnect (synthetic)")
+        try await checkBrokenRelaySubprocesses()
     }
 }

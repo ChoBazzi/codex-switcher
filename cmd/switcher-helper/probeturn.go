@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,8 @@ type probeTurnWriter struct {
 	holdTerminal                      bool
 	frame, held                       []byte
 	onTerminal                        func()
+	reasoning                         map[[32]byte]bool
+	agentMessages                     map[[32]byte]bool
 }
 
 func (w *probeTurnWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -117,12 +120,28 @@ func (w *probeTurnWriter) item(item map[string]json.RawMessage) {
 	switch probeString(item, "type") {
 	case "function_call", "custom_tool_call":
 		w.called = true
+		if message := probeAgentOutputMessage(item); message != "" {
+			if w.agentMessages == nil {
+				w.agentMessages = map[[32]byte]bool{}
+			}
+			w.agentMessages[sha256.Sum256([]byte(message))] = true
+			if len(w.agentMessages) > probeAgentOwnerLimit {
+				w.invalid = true
+			}
+		}
 	case "message":
 		phase := probeString(item, "phase")
 		if probeString(item, "role") == "assistant" && (phase == "" || phase == "final_answer") {
 			w.final = true
 		}
 	case "reasoning":
+		if w.reasoning == nil {
+			w.reasoning = map[[32]byte]bool{}
+		}
+		w.reasoning[probeReasoningKey(item)] = true
+		if len(w.reasoning) > 1024 {
+			w.invalid = true
+		}
 	default:
 		w.invalid = true
 	}

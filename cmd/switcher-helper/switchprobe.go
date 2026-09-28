@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -68,9 +69,8 @@ func probeTextBody(body []byte) ([]byte, error) {
 	}
 	textItems := make([]map[string]json.RawMessage, 0, len(items))
 	for i, item := range items {
-		var kind, role string
+		var kind string
 		_ = json.Unmarshal(item["type"], &kind)
-		_ = json.Unmarshal(item["role"], &role)
 		if kind == "additional_tools" {
 			// Installed CLI sends tool declarations inside input, not only at
 			// the top level. This experiment disables tools at both locations.
@@ -85,37 +85,10 @@ func probeTextBody(body []byte) ([]byte, error) {
 			}
 			continue
 		}
-		if kind != "" && kind != "message" {
-			return nil, bad("item_type_"+probeCategory(kind), i, -1)
+		if err := probeTextMessage(item, i); err != nil {
+			return nil, err
 		}
-		if role != "user" && role != "assistant" && role != "system" && role != "developer" {
-			return nil, bad("unsupported_role", i, -1)
-		}
-		if raw, exists := item["phase"]; exists {
-			var phase string
-			if role != "assistant" || json.Unmarshal(raw, &phase) != nil || phase != "commentary" && phase != "final_answer" {
-				return nil, bad("message_phase_invalid", i, -1)
-			}
-		}
-		for key := range item {
-			if key != "type" && key != "role" && key != "content" && key != "id" && key != "status" && key != "phase" {
-				return nil, bad("message_field_"+probeCategory(key), i, -1)
-			}
-		}
-		var parts []struct {
-			Type string `json:"type"`
-		}
-		var plain string
-		if json.Unmarshal(item["content"], &plain) != nil {
-			if json.Unmarshal(item["content"], &parts) != nil {
-				return nil, bad("invalid_content_shape", i, -1)
-			}
-			for j, part := range parts {
-				if part.Type != "input_text" && part.Type != "output_text" {
-					return nil, bad("content_type_"+probeCategory(part.Type), i, j)
-				}
-			}
-		}
+
 		delete(item, "id")
 		textItems = append(textItems, item)
 	}
@@ -125,6 +98,45 @@ func probeTextBody(body []byte) ([]byte, error) {
 	delete(p, "additional_tools")
 	p["tool_choice"] = json.RawMessage(`"none"`)
 	return json.Marshal(p)
+}
+
+// Share the existing text contract without serializing each message into a
+// temporary request and decoding it again in the tools path.
+func probeTextMessage(item map[string]json.RawMessage, i int) error {
+	bad := func(reason string, item, part int) error { return &probeBodyError{reason, item, part} }
+	kind, role := probeString(item, "type"), probeString(item, "role")
+	if kind != "" && kind != "message" {
+		return bad("item_type_"+probeCategory(kind), i, -1)
+	}
+	if role != "user" && role != "assistant" && role != "system" && role != "developer" {
+		return bad("unsupported_role", i, -1)
+	}
+	if raw, exists := item["phase"]; exists {
+		var phase string
+		if role != "assistant" || json.Unmarshal(raw, &phase) != nil || phase != "commentary" && phase != "final_answer" {
+			return bad("message_phase_invalid", i, -1)
+		}
+	}
+	for key := range item {
+		if key != "type" && key != "role" && key != "content" && key != "id" && key != "status" && key != "phase" {
+			return bad("message_field_"+probeCategory(key), i, -1)
+		}
+	}
+	var parts []struct {
+		Type string `json:"type"`
+	}
+	var plain string
+	if json.Unmarshal(item["content"], &plain) != nil {
+		if json.Unmarshal(item["content"], &parts) != nil {
+			return bad("invalid_content_shape", i, -1)
+		}
+		for j, part := range parts {
+			if part.Type != "input_text" && part.Type != "output_text" {
+				return bad("content_type_"+probeCategory(part.Type), i, j)
+			}
+		}
+	}
+	return nil
 }
 
 func probeAdmissionCode(identityErr error, busy, failed bool, session, id string) string {
@@ -155,6 +167,19 @@ type probeAccess interface {
 	Access(string, time.Time) (accounts.Access, error)
 }
 
+func probeHistoryCredential(access probeAccess, slot string) ([32]byte, error) {
+	if local, ok := access.(interface {
+		HistoryCredential(string) ([32]byte, error)
+	}); ok {
+		return local.HistoryCredential(slot)
+	}
+	c, err := access.Access(slot, time.Now())
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return c.HistoryCredential(), nil
+}
+
 func probeSelectionAllowed(target string, expected, revision uint64, busy, failed bool) bool {
 	return (accountslot.Valid(target)) && expected == revision && !busy && !failed
 }
@@ -173,6 +198,11 @@ func switchProbeWithUsageTiming(args []string, input io.Reader, output io.Writer
 }
 
 func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration, checkpointDir string) error {
+	return switchProbeWithSharedUsage(args, input, output, access, upstream, fetcher, interval, cooldown, checkpointDir, nil, true)
+}
+
+// Secondary connections consume the primary's quota observations, never poll.
+func switchProbeWithSharedUsage(args []string, input io.Reader, output io.Writer, access probeAccess, upstream string, fetcher usage.Fetcher, interval, cooldown time.Duration, checkpointDir string, sharedUsage *probeUsageCache, usagePrimary bool) error {
 	f := flag.NewFlagSet("switch-probe", flag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	confirm := f.Bool("allow-live", false, "explicit live-account experiment")
@@ -198,6 +228,11 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		if checkpointErr != nil {
 			return checkpointErr
 		}
+		// Only an explicit coordinator create reuses a deleted slot. Its old
+		// home and history remain on disk, but never supply a new capability.
+		if saved != nil && saved.Deleted {
+			saved = nil
+		}
 	}
 	secret := newDirectSecret()
 	if saved != nil {
@@ -206,15 +241,20 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	var mu sync.Mutex
 	var handlers sync.WaitGroup
 	closing := false
+	shutdownPrepared := false
 	slot, session := "a", ""
 	busy, failed := false, false
 	turnPending, previousSlot := false, ""
+	var previousCredential, activeTurnOwner [32]byte
 	var requestDone chan struct{}
 	terminalReady, waiting := false, false
 	var lastBodyHash [32]byte
 	var lastUserBoundary [32]byte
 	recoveryRequired := false
 	compactOwners := probeCompactRegistry{}
+	var reasoningOwners probeReasoningOwners
+	agentOwners := &probeAgentOwners{}
+	var portableBoundary [32]byte
 	var activeCompactItems []map[string]json.RawMessage
 	var activeCredential [32]byte
 	opaqueSlot := ""
@@ -222,6 +262,16 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	samples := make([]usage.Snapshot, accountslot.Capacity)
 	for i, slot := range accountslot.All() {
 		samples[i] = usage.Snapshot{Slot: slot, State: "unknown", Stale: true}
+	}
+	limits := &probeLimitState{}
+	if sharedUsage != nil {
+		limits = &sharedUsage.limits
+	}
+	quotaSamples := func() []usage.Snapshot {
+		if sharedUsage != nil {
+			return limits.apply(sharedUsage.load())
+		}
+		return limits.apply(samples)
 	}
 	var usageEpoch [accountslot.Capacity]uint64
 	var accountChanging [accountslot.Capacity]bool
@@ -273,8 +323,14 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	var revision uint64
 	if saved != nil {
 		slot, session, previousSlot = saved.Slot, saved.Session, saved.PreviousSlot
+		previousCredential = saved.PreviousCredential
+		for _, owner := range saved.AgentOwners {
+			if !agentOwners.accept(map[[32]byte]bool{owner.Message: true}, owner.Credential) {
+				return errCheckpoint
+			}
+		}
 		for _, binding := range saved.Auxiliary {
-			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true}
+			auxiliary[binding.Thread] = &probeAuxiliary{binding: binding, failed: true, restored: true, agentOwners: agentOwners}
 		}
 		chosen, failed = saved.Chosen, saved.Failed || saved.Busy || saved.TurnPending
 		recoveryRequired = saved.RecoveryRequired || session != ""
@@ -286,6 +342,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	}
 	var checkpointAddress, checkpointHome string
 	checkpointRetired := false
+	checkpointDeleted := false
 	var lastCheckpoint *probeCheckpoint
 	persist := func() bool {
 		if checkpointDir == "" {
@@ -294,19 +351,20 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		if checkpointErr != nil {
 			return false
 		}
-		c := &probeCheckpoint{Retired: checkpointRetired, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
+		c := &probeCheckpoint{Retired: checkpointRetired, Deleted: checkpointDeleted, Version: 1, Address: checkpointAddress, Home: checkpointHome, Secret: secret,
 			Session: session, Slot: slot, PreviousSlot: previousSlot, Chosen: chosen, Busy: busy,
 			Failed: failed, TurnPending: turnPending, RecoveryRequired: recoveryRequired,
-			LastBody: lastBodyHash, LastUser: lastUserBoundary, Revision: revision, OpaqueSlot: opaqueSlot}
+			LastBody: lastBodyHash, LastUser: lastUserBoundary, PreviousCredential: previousCredential, Revision: revision, OpaqueSlot: opaqueSlot}
+		c.AgentOwners = agentOwners.snapshot()
 		for _, a := range auxiliary {
 			c.Auxiliary = append(c.Auxiliary, a.binding)
 		}
 		sort.Slice(c.Auxiliary, func(i, j int) bool { return c.Auxiliary[i].Thread < c.Auxiliary[j].Thread })
+		if sameProbeCheckpointRegistry(lastCheckpoint, c, compactOwners) {
+			return true
+		}
 		for key, owner := range compactOwners {
 			c.Owners = append(c.Owners, probeCheckpointOwner{key, owner.credential, owner.slot})
-		}
-		if sameProbeCheckpoint(lastCheckpoint, c) {
-			return true
 		}
 		checkpointErr = writeProbeCheckpoint(checkpointDir, c)
 		if checkpointErr != nil {
@@ -319,27 +377,50 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	}
 	var outMu sync.Mutex
 	report := func(v any) { outMu.Lock(); defer outMu.Unlock(); _ = json.NewEncoder(output).Encode(v) }
+	for _, a := range auxiliary {
+		a.report = report
+	}
 	refreshEvent := func(id uint64, status string, succeeded bool) {
 		report(map[string]any{"event": "usage_refresh", "request_id": id, "status": status, "succeeded": succeeded})
 	}
 	publishUsage := func() {
+		if sharedUsage != nil && usagePrimary {
+			sharedUsage.store(samples)
+		}
 		aged := make([]usage.Snapshot, len(samples))
 		for i, s := range samples {
 			aged[i] = s.At(time.Now())
 		}
 		report(map[string]any{"event": "usage_snapshot", "interval_seconds": 60, "accounts": aged})
 	}
-	if *automatic {
+	var usageDone chan struct{}
+	defer func() {
+		cancel()
+		if usageDone != nil {
+			<-usageDone
+		}
+	}()
+	// Promotion happens only after the previous primary has fully stopped.
+	// Surviving model conversations retain their handlers and ownership.
+	startUsage := func() {
+		if !*automatic || usageDone != nil {
+			return
+		}
+		usagePrimary = true
+		usageRunning = true
+		var client *usage.Client
 		if fetcher == nil {
-			client := usage.NewClient()
-			defer client.Close()
+			client = usage.NewClient()
 			fetcher = client
 		}
 		monitor := usage.NewMonitor(access, fetcher)
 		done := make(chan struct{})
-		defer func() { cancel(); <-done }()
+		usageDone = done
 		go func() {
 			defer close(done)
+			if client != nil {
+				defer client.Close()
+			}
 			var observed [accountslot.Capacity]uint64
 			for {
 				if ctx.Err() != nil {
@@ -393,6 +474,9 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			}
 		}()
 	}
+	if usagePrimary {
+		startUsage()
+	}
 	// Caller holds mu. A single ordered pipe carries observations and acknowledgments.
 	state := func(event string, accepted bool) {
 		if !persist() {
@@ -402,18 +486,39 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 			turnLease.Close()
 			turnLease = nil
 		}
+		var authentication []accounts.AuthenticationStatus
+		if source, ok := access.(interface {
+			AuthenticationStatus() []accounts.AuthenticationStatus
+		}); ok {
+			authentication = source.AuthenticationStatus()
+		}
 		report(map[string]any{"event": event, "accepted": accepted, "slot": slot, "busy": busy || turnPending || auxActive(), "failed": failed, "connected": session != "", "revision": revision, "completion_pending": terminalReady,
+			"conversation":    session,
+			"authentication":  authentication,
+			"auxiliary_count": len(auxiliary), "auxiliary_limit": probeAuxiliaryLimit,
 			"can_recover_current": checkpointDir != "" && failed && !busy && !turnPending && !auxActive(),
 			"can_abandon_turn":    (!busy && !waiting && !auxBusy() && (auxPending() || probeAbandonAllowed(revision, revision, busy, waiting, turnPending, failed)))})
 	}
 	resolve := func(r *http.Request) (proxy.Identity, error) {
 		mu.Lock()
+		selected, conversation := slot, session
+		mu.Unlock()
+		c, err := usage.RequestAccessContext(r.Context(), access, selected, time.Now())
+		if err != nil {
+			return proxy.Identity{}, probeAccessError(err)
+		}
+		mu.Lock()
 		defer mu.Unlock()
-		c, err := usage.RequestAccess(access, slot, time.Now())
-		activeCredential = sha256.Sum256([]byte(c.Token))
+		if closing || checkpointErr != nil || slot != selected || session != conversation || r.Context().Err() != nil {
+			return proxy.Identity{}, proxy.ErrAccountUnavailable
+		}
+		activeCredential = c.HistoryCredential()
+		if activeTurnOwner != ([32]byte{}) && activeCredential != activeTurnOwner {
+			return proxy.Identity{}, proxy.ErrHistoryOwner
+		}
 		for _, item := range activeCompactItems {
 			if !compactOwners.permits(item, slot, activeCredential) {
-				return proxy.Identity{}, errors.New("compaction_owner_unavailable")
+				return proxy.Identity{}, proxy.ErrCompactionOwner
 			}
 		}
 		return proxy.Identity{Session: session, Token: c.Token, AccountID: c.AccountID}, err
@@ -423,6 +528,17 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 		defer mu.Unlock()
 		if err := compactOwners.accept(body, slot, activeCredential); err != nil {
 			return err
+		}
+		var window struct{ Output []map[string]json.RawMessage }
+		_ = json.Unmarshal(body, &window)
+		keys := map[[32]byte]bool{}
+		for _, item := range window.Output {
+			if probeString(item, "type") == "reasoning" {
+				keys[probeReasoningKey(item)] = true
+			}
+		}
+		if !reasoningOwners.accept(keys, activeCredential, lastUserBoundary) {
+			return errors.New("reasoning_owner_unavailable")
 		}
 		opaqueSlot = slot
 		if !persist() {
@@ -436,6 +552,7 @@ func switchProbeWithCheckpoint(args []string, input io.Reader, output io.Writer,
 	}
 	if *toolsMode {
 		h.ValidateCompaction = validateCompact
+		h.DeferUsageLimit = *automatic
 	}
 	defer func() { mu.Lock(); defer mu.Unlock(); h.Close() }()
 	address := "127.0.0.1:0"
@@ -502,9 +619,9 @@ X-Switcher-Run = %q
 			_ = os.Remove(path)
 		}
 	}()
-	server := &http.Server{ReadHeaderTimeout: 5 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := probeHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		if closing {
+		if closing || shutdownPrepared {
 			mu.Unlock()
 			http.Error(w, "proxy_service_stopping", 503)
 			return
@@ -524,27 +641,30 @@ X-Switcher-Run = %q
 		id, root, identityErr := cliidentity.Conversation(r.Header)
 		if *toolsMode && identityErr == nil && id != root {
 			mu.Lock()
-			if closing {
+			if closing || shutdownPrepared {
 				mu.Unlock()
 				http.Error(w, "proxy_service_stopping", 503)
 				return
 			}
 			if session != "" && root != session {
 				mu.Unlock()
+				report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": "probe_conversation_changed"})
 				http.Error(w, "probe_conversation_changed", 409)
 				return
 			}
 			a := auxiliary[id]
 			if a == nil {
-				if failed || checkpointErr != nil || len(auxiliary) >= 128 {
+				if code := probeAuxiliaryAdmission(failed, checkpointErr != nil, len(auxiliary)); code != "" {
 					mu.Unlock()
-					http.Error(w, "probe_auxiliary_unavailable", 409)
+					report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": code})
+					http.Error(w, code, 409)
 					return
 				}
 				if *automatic && !chosen {
-					next, reason := probeQuotaSelection("", samples, time.Now())
+					next, reason := probeQuotaSelection("", quotaSamples(), time.Now())
 					if next == "" {
 						mu.Unlock()
+						report(map[string]any{"event": "probe_blocked", "scope": "auxiliary", "code": reason})
 						http.Error(w, reason, 409)
 						return
 					}
@@ -553,12 +673,18 @@ X-Switcher-Run = %q
 				if session == "" {
 					session = root
 				}
-				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}}
+				a = &probeAuxiliary{binding: probeAuxiliaryBinding{Thread: id, Root: root, Slot: slot}, report: report, agentOwners: agentOwners}
+				if *automatic {
+					a.quotaAlternative = func(tried map[string]bool) string {
+						limits.mark(a.binding.Slot)
+						return probeQuotaAlternative(quotaSamples(), tried, time.Now())
+					}
+				}
 				auxiliary[id] = a
 			}
 			mu.Unlock()
 			a.serve(w, r, &mu, access, upstream, secret, func() bool { revision++; state("probe_state", false); return checkpointErr == nil }, func() error {
-				if closing || checkpointErr != nil {
+				if closing || shutdownPrepared || checkpointErr != nil {
 					return errCheckpoint
 				}
 				if turnLease == nil {
@@ -576,7 +702,7 @@ X-Switcher-Run = %q
 		}
 		id, err := cliidentity.ThreadID(r.Header)
 		mu.Lock()
-		if closing {
+		if closing || shutdownPrepared {
 			mu.Unlock()
 			http.Error(w, "proxy_service_stopping", 503)
 			return
@@ -638,7 +764,7 @@ X-Switcher-Run = %q
 			if chosen {
 				current = slot
 			}
-			next, reason := probeQuotaSelection(current, samples, time.Now())
+			next, reason := probeQuotaSelection(current, quotaSamples(), time.Now())
 			if next != "" && opaqueSlot != "" && next != opaqueSlot {
 				next, reason = "", "probe_compaction_account_pinned"
 			}
@@ -664,12 +790,14 @@ X-Switcher-Run = %q
 		busy, session = true, id
 		activeCompactItems = nil
 		activeCredential = [32]byte{}
+		activeTurnOwner = [32]byte{}
 		requestDone = make(chan struct{})
 		finished := requestDone
 		terminalReady = false
 		revision++
 		selected := slot
 		owner := previousSlot
+		ownerCredential := previousCredential
 		state("probe_state", false)
 		if checkpointErr != nil {
 			busy = false
@@ -704,17 +832,34 @@ X-Switcher-Run = %q
 			busy = false
 			activeCompactItems = nil
 			activeCredential = [32]byte{}
+			activeTurnOwner = [32]byte{}
 			terminalReady = false
 			revision++
 			state("probe_state", false)
 			close(finished)
 			mu.Unlock()
 		}()
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
-		r.Body.Close()
+		body, err := readProbeBody(w, r)
+		if err != nil {
+			status, code := probeBodyRejection(err)
+			diagnostic = proxy.Diagnostics{Status: status, Rejection: code}
+			http.Error(w, code, status)
+			return
+		}
+		originalBody := append([]byte(nil), body...)
+		var parsedInput *probeToolInput
+		if *toolsMode {
+			parsedInput = parseProbeToolInput(body)
+		}
 		if err == nil {
 			hash := sha256.Sum256(body)
-			boundary, hasUser := probeUserBoundary(body)
+			var boundary [32]byte
+			var hasUser bool
+			if parsedInput != nil {
+				boundary, hasUser = probeItemsUserBoundary(parsedInput.items)
+			} else {
+				boundary, hasUser = probeUserBoundary(body)
+			}
 			mu.Lock()
 			needsInput := recoveryRequired && (!hasUser || boundary == lastUserBoundary)
 			duplicate := waited && hash == lastBodyHash
@@ -738,22 +883,46 @@ X-Switcher-Run = %q
 		}
 		if err == nil {
 			if *toolsMode {
-				items := probeCompactItems(body)
-				var credential [32]byte
-				if len(items) > 0 {
-					c, accessErr := access.Access(selected, time.Now())
-					if accessErr == nil {
-						credential = sha256.Sum256([]byte(c.Token))
-					}
+				mu.Lock()
+				parsedInput.portable = portableBoundary != ([32]byte{}) && portableBoundary == lastUserBoundary
+				mu.Unlock()
+				items := parsedInput.compactItems()
+				credential, accessErr := probeHistoryCredential(access, selected)
+				if accessErr != nil {
+					status, code := probeAuthenticationRejection(accessErr)
+					diagnostic = proxy.Diagnostics{Status: status, Rejection: code}
+					http.Error(w, code, status)
+					return
 				}
-				body, err = probeToolBodyWithCompaction(body, selected, owner, secret, func(item map[string]json.RawMessage) bool {
+				if credential == ([32]byte{}) || credential != ownerCredential {
+					owner = ""
+				}
+				parsedInput.agentOwner = func(content string) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					return agentOwners.permits(content, credential)
+				}
+				body, err = parsedInput.normalize(selected, owner, secret+":"+hex.EncodeToString(credential[:]), func(item map[string]json.RawMessage) bool {
 					mu.Lock()
 					defer mu.Unlock()
 					return compactOwners.permits(item, selected, credential)
+				}, func(item map[string]json.RawMessage) bool {
+					mu.Lock()
+					defer mu.Unlock()
+					return reasoningOwners.permits(item, credential)
 				})
 				if err == nil {
 					mu.Lock()
 					activeCompactItems = items
+					if parsedInput.portable {
+						activeTurnOwner = credential
+					}
+					if parsedInput.needsTurnOwner {
+						activeTurnOwner = ownerCredential
+					}
+					if parsedInput.needsAgentOwner {
+						activeTurnOwner = credential
+					}
 					if len(items) == 0 {
 						opaqueSlot = ""
 					}
@@ -778,6 +947,7 @@ X-Switcher-Run = %q
 			if errors.As(err, &parsed) {
 				detail = parsed
 			}
+			diagnostic.RejectionDetail = detail.Reason
 			report(map[string]any{"event": "probe_blocked", "code": code, "detail": detail})
 			return
 		}
@@ -790,25 +960,105 @@ X-Switcher-Run = %q
 			http.Error(w, "proxy_checkpoint_unavailable", 503)
 			return
 		}
-		r.ContentLength = int64(len(body))
-		turn := &probeTurnWriter{ResponseWriter: w, holdTerminal: *toolsMode, onTerminal: func() { mu.Lock(); terminalReady = true; state("probe_state", false); mu.Unlock() }}
-		attempted = true
-		if *toolsMode && !compact {
-			h.ServeHTTP(turn, r)
-		} else {
-			h.ServeHTTP(w, r)
+		var turn *probeTurnWriter
+		var d proxy.Diagnostics
+		tried := map[string]bool{}
+		for {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			turn = &probeTurnWriter{ResponseWriter: w, holdTerminal: *toolsMode, onTerminal: func() { mu.Lock(); terminalReady = true; state("probe_state", false); mu.Unlock() }}
+			attempted = true
+			tried[selected] = true
+			if *toolsMode && !compact {
+				h.ServeHTTP(turn, r)
+			} else {
+				h.ServeHTTP(w, r)
+			}
+			d = h.Diagnostics()
+			if !d.UsageLimit {
+				break
+			}
+			// No bytes were delivered for this attempt. Only an explicit usage
+			// limit can reach this path; never replay generic errors or streams.
+			mu.Lock()
+			limits.mark(selected)
+			snapshots := quotaSamples()
+			next := probeQuotaAlternative(snapshots, tried, time.Now())
+			allowed := *automatic && *toolsMode && !compact && opaqueSlot == "" && next != "" && !closing && checkpointErr == nil && r.Context().Err() == nil
+			mu.Unlock()
+			if !allowed {
+				writeProbeUsageLimit(w)
+				break
+			}
+			credential, accessErr := probeHistoryCredential(access, next)
+			if accessErr != nil || credential == ([32]byte{}) {
+				writeProbeUsageLimit(w)
+				break
+			}
+			portable := parseProbeToolInput(originalBody)
+			portable.portable = true
+			nextBody, bodyErr := portable.normalize(next, "", secret+":"+hex.EncodeToString(credential[:]), nil, nil)
+			if bodyErr != nil {
+				writeProbeUsageLimit(w)
+				break
+			}
+			replacement, createErr := proxy.New(upstream, resolve)
+			if createErr != nil {
+				writeProbeUsageLimit(w)
+				break
+			}
+			replacement.ValidateCompaction = validateCompact
+			replacement.DeferUsageLimit = true
+			mu.Lock()
+			if closing || checkpointErr != nil || r.Context().Err() != nil {
+				mu.Unlock()
+				replacement.Close()
+				writeProbeUsageLimit(w)
+				break
+			}
+			from := slot
+			slot, selected, chosen = next, next, true
+			portableBoundary = lastUserBoundary
+			activeCompactItems = nil
+			// Portable history contains no opaque state or original call IDs.
+			// Still pin actual dispatch to the authentication we normalized for.
+			activeCredential = [32]byte{}
+			activeTurnOwner = credential
+			revision++
+			state("probe_state", false)
+			stored := checkpointErr == nil
+			mu.Unlock()
+			if !stored {
+				replacement.Close()
+				http.Error(w, "proxy_checkpoint_unavailable", 503)
+				break
+			}
+			h.Close()
+			h = replacement
+			body = nextBody
+			report(map[string]any{"event": "probe_quota_switch", "from": from, "slot": next})
 		}
-		d := h.Diagnostics()
+
 		mu.Lock()
 		failed = d.Status != 200 || d.ResponseFailure != "" || d.Rejection != ""
 		if compact && !failed {
 			previousSlot = selected
+			previousCredential = activeCredential
 		}
 		if *toolsMode && !compact {
 			failed = failed || !turn.valid()
+			if !failed && !reasoningOwners.accept(turn.reasoning, activeCredential, lastUserBoundary) {
+				failed = true
+				d.ResponseFailure = "probe_reasoning_ownership_unavailable"
+			}
+			if !failed && !agentOwners.accept(turn.agentMessages, activeCredential) {
+				failed = true
+				d.ResponseFailure = "agent_message_owner_unavailable"
+			}
 			turnPending = !failed && turn.pending()
 			if !failed {
 				previousSlot = selected
+				previousCredential = activeCredential
 			}
 		}
 		completed = !failed
@@ -826,7 +1076,7 @@ X-Switcher-Run = %q
 				diagnostic.ResponseFailure = "probe_client_write_failed"
 			}
 		}
-	})}
+	}))
 	defer server.Close()
 	instruction := "Run CODEX_HOME=<codex_home> codex in another terminal. After a completed reply, type b here. No hooks. Plain text only. Local history remains in this temporary directory."
 	if *toolsMode {
@@ -840,7 +1090,7 @@ X-Switcher-Run = %q
 	}
 	go server.Serve(listener)
 	mu.Lock()
-	report(map[string]any{"event": "probe_ready", "slot": slot, "codex_home": home, "instruction": instruction})
+	report(map[string]any{"event": "probe_ready", "slot": slot, "codex_home": home, "instruction": instruction, "build_id": processBuildID, "protocol_version": controlProtocolVersion})
 	state("probe_state", false)
 	mu.Unlock()
 	go func() {
@@ -857,6 +1107,7 @@ X-Switcher-Run = %q
 				var command struct {
 					Action     string `json:"action"`
 					NewSession bool   `json:"new_session"`
+					Delete     bool   `json:"delete_connection"`
 					Slot       string `json:"slot"`
 					Revision   uint64 `json:"revision"`
 					RequestID  uint64 `json:"request_id"`
@@ -866,10 +1117,27 @@ X-Switcher-Run = %q
 					mu.Unlock()
 					continue
 				}
+				if command.Action == "prepare_shutdown" {
+					shutdownPrepared = !busy && !waiting && !turnPending && !auxActive() && checkpointErr == nil && (!command.Delete || command.Revision == revision)
+					state("probe_shutdown_prepared", shutdownPrepared)
+					mu.Unlock()
+					continue
+				}
+				if command.Action == "usage_primary" {
+					startUsage()
+					mu.Unlock()
+					continue
+				}
+				if command.Action == "abort_shutdown" {
+					shutdownPrepared = false
+					state("probe_shutdown_aborted", true)
+					mu.Unlock()
+					continue
+				}
 				if command.Action == "status" {
 					// A UI may disappear before its account_changed notification. Once the
 					// credential operation lock is free, reconcile pending slots locally.
-					if owner, ok := access.(interface{ AccountsIdle() bool }); ok && owner.AccountsIdle() {
+					if owner, ok := access.(interface{ AccountsIdle() bool }); ok && usagePrimary && owner.AccountsIdle() {
 						changed := false
 						for i, pending := range accountChanging {
 							if pending {
@@ -888,7 +1156,10 @@ X-Switcher-Run = %q
 					continue
 				}
 				if command.Action == "shutdown" {
-					ok := !busy && !waiting && !turnPending && !auxActive()
+					ok := !busy && !waiting && !turnPending && !auxActive() && (!command.Delete || shutdownPrepared)
+					if ok && command.Delete {
+						checkpointDeleted = true
+					}
 					if ok && command.NewSession {
 						checkpointRetired = true
 					}
@@ -968,10 +1239,10 @@ X-Switcher-Run = %q
 						mu.Unlock()
 						continue
 					}
-					target, _ = probeQuotaSelection("", samples, time.Now())
+					target, _ = probeQuotaSelection("", quotaSamples(), time.Now())
 					if opaqueSlot != "" {
 						// Encrypted history must stay with its verified owner.
-						target, _ = probeQuotaSelection(opaqueSlot, samples, time.Now())
+						target, _ = probeQuotaSelection(opaqueSlot, quotaSamples(), time.Now())
 					}
 					command.Slot = target
 				} else if command.Action != "select" {
@@ -987,7 +1258,7 @@ X-Switcher-Run = %q
 				ok = false
 			}
 			if ok && *automatic {
-				next, _ := probeQuotaSelection(target, samples, time.Now())
+				next, _ := probeQuotaSelection(target, quotaSamples(), time.Now())
 				ok = next == target
 			}
 			if ok {
@@ -1007,9 +1278,11 @@ X-Switcher-Run = %q
 					h = next
 					if *toolsMode {
 						h.ValidateCompaction = validateCompact
+						h.DeferUsageLimit = *automatic
 					}
 					failed, recoveryRequired = false, true
 					previousSlot = ""
+					previousCredential = [32]byte{}
 				}
 				slot = target
 				chosen = true

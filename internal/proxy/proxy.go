@@ -31,6 +31,9 @@ type Identity struct {
 type Resolver func(*http.Request) (Identity, error)
 
 type Handler struct {
+	// Opt-in managed owner must consume Diagnostics.UsageLimit and either
+	// switch accounts or emit an error. A recognized limit writes no response.
+	DeferUsageLimit bool
 	// BeforeAttempt is configured before serving by the trusted launcher.
 	// It cannot add an upstream attempt and may reject dispatch locally.
 	BeforeAttempt func() error
@@ -49,10 +52,12 @@ type Handler struct {
 
 // Diagnostics contains only local constants and counters, never upstream text.
 type Diagnostics struct {
+	UsageLimit          bool   `json:"usage_limit,omitempty"`
 	Requests            int    `json:"cli_requests"`
 	Attempts            int    `json:"upstream_attempts"`
 	Status              int    `json:"last_http_status"`
 	Rejection           string `json:"local_rejection_code"`
+	RejectionDetail     string `json:"local_rejection_detail,omitempty"`
 	ResponseFailure     string `json:"response_failure_code"`
 	ResponseFormat      string `json:"response_format"`
 	CompletionRejection string `json:"completion_rejection_code"`
@@ -190,6 +195,7 @@ func (h *Handler) finish(session string, failed bool) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.diagnostic.Requests++
+	h.diagnostic.UsageLimit = false
 	h.diagnostic.Status, h.diagnostic.Rejection = 0, ""
 	h.diagnostic.ResponseFailure = ""
 	h.diagnostic.ResponseFormat = ""
@@ -205,9 +211,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.reject(w, 400, "unsupported_transport")
 		return
 	}
+	if r.Context().Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
+	}
 	identity, err := h.resolve(r)
+	if r.Context().Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
+	}
 	if err != nil || identity.Session == "" || identity.Token == "" {
-		h.reject(w, 401, "session_unavailable")
+		status, code := identityRejection(err)
+		h.reject(w, status, code)
 		return
 	}
 	if !h.begin(identity.Session) {
@@ -278,6 +293,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if ctx.Err() != nil {
+		h.reject(w, 408, "request_canceled")
+		return
+	}
 	h.mu.Lock()
 	h.diagnostic.Attempts++
 	h.mu.Unlock()
@@ -296,6 +315,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
 		h.reject(w, 502, "unsupported_encoding")
+		return
+	}
+	if h.DeferUsageLimit && !compact && h.store == nil && inspectUsageLimit(resp) {
+		h.mu.Lock()
+		h.diagnostic.Status = http.StatusTooManyRequests
+		h.diagnostic.UsageLimit = true
+		h.diagnostic.Rejection = "upstream_usage_limit"
+		h.mu.Unlock()
 		return
 	}
 	contentType := resp.Header.Get("Content-Type")
